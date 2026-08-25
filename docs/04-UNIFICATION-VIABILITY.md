@@ -159,15 +159,31 @@ survives and we rewrite adapters.
 | Security posture | Explicit: untrusted inbound, DM pairing approval | Less documented |
 | Migration pressure | — | **Imports from OpenClaw** (one-way) |
 
-**Recommendation: OpenClaw as the control plane; Hermes attached as a *runtime* for
-learned-procedure work, if and when we can show a task class where its learning loop
-measurably beats a strong model over MCP.**
+> **DECIDED (D1, 2026-08-25): deferred to a measured bake-off.** See
+> [`09-DECISIONS.md`](09-DECISIONS.md) D1 and the bake-off spec in
+> [`10-CONTROL-PLANE-BAKEOFF.md`](10-CONTROL-PLANE-BAKEOFF.md).
 
-Reasoning: the node/device model and the harness SDK are the two things this project
-cannot easily rebuild, and OpenClaw has both. Hermes' differentiators (memory layers,
-skill learning) are *patterns we can implement in our own core* — and must, since memory
-is a core-owned concern (Rule 2). Note also that migration runs OpenClaw → Hermes, which
-means starting on OpenClaw keeps that door open; starting on Hermes closes it.
+My reading of the documentation favoured **OpenClaw**: the node/device model and the
+harness SDK are the two things this project cannot easily rebuild, and OpenClaw has both,
+while Hermes' differentiators (memory layers, skill learning) are patterns we implement in
+our own core anyway under Rule 2.
+
+That reading was overridden, correctly, on a priority I can't measure from a README: **the
+learning loop and memory quality matter most for how this system will actually be used** —
+and those are exactly Hermes' axis. The two candidates are strong on opposite axes, which
+is the textbook case for measuring rather than recommending.
+
+So: build the Phase 0 core against the adapter with a stub backend, then bake both off on
+a fixed task set with a rubric fixed in advance. Two-week timebox; if it runs long, the
+tiebreak is OpenClaw, because Hermes imports from OpenClaw one-way and starting there
+preserves an exit.
+
+**The consequence that matters more than the choice** (D4): deferring *and* prioritising
+the learning loop together force **both memory and procedural learning into our core**,
+emitting portable `SKILL.md` drafts. If either lived inside a control plane, the bake-off
+would be unrunnable — switching would mean abandoning the thing we said we cared about
+most. The deferral makes the "no vendor types in the core" invariant load-bearing rather
+than aspirational, which is a benefit, not a cost.
 
 **Where Personal Jarvis lands:** not as the crown. Harvest its two genuinely
 differentiated assets — the **voice pipeline with the sub-second acknowledge path** and
@@ -224,16 +240,19 @@ The highest-value thing to build is not a connection between two agent OSes. It 
 
 ---
 
-## 8. Open questions that genuinely need a decision
+## 8. Open questions — status
 
-1. **Control plane**: OpenClaw (recommended) or Hermes? Reversible early, expensive later.
-2. **Does Personal Jarvis code get used at all**, or do we take the voice-pipeline design
-   and implement it directly as a node? (Adopting the code means adopting a self-modifying
-   dependency in the voice path.)
-3. **Where does canonical memory live** — our core (recommended, per Rule 2) or the control
-   plane's store with our core as index?
-4. **What is the first proactive watch?** It should be something with an unambiguous
-   threshold, a real cost of missing it, and no untrusted input. Candidates: CI/deploy
-   health, calendar conflict, vehicle charge state.
-5. **Which surface first** — desktop voice, phone, or room satellite? This determines the
-   node protocol work.
+Resolved and pending decisions live in [`09-DECISIONS.md`](09-DECISIONS.md).
+
+| # | Question | Status |
+|---|---|---|
+| 1 | Control plane: OpenClaw or Hermes? | **D1 — deferred to bake-off** (doc 10), two-week timebox, tiebreak OpenClaw |
+| 2 | Does Personal Jarvis contribute code or only design? | **D2 — audit first**, with the decision rule set in advance so the audit can't be rationalised afterwards |
+| 3 | Where does canonical memory live? | **D4 — our core**, forced by D1. Control plane owns `operational` state only |
+| 4 | First proactive watch? | **D3 — CI / deploy health.** Unambiguous threshold, real cost of missing it, structured trigger input |
+| 5 | Which surface first? | **Open.** Determines node-protocol work in Phase 2; not blocking Phase 0–1 |
+
+One boundary worth restating from D3: CI *status* is trusted structured data, but **check-run
+names, job logs and PR comment bodies are untrusted** — anyone who can open a PR or install
+an app writes them. The trigger path is clean; any summarization of log content runs under
+the Untrusted Ingest Rule.

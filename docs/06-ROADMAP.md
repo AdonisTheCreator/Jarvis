@@ -28,19 +28,52 @@ Exit criteria:
 
 ---
 
+## Phase 0.5 — Audit and bake-off
+**Two investigations that must finish before a control plane runs in anger.**
+
+**A. Personal Jarvis audit** (decision D2). Fork, pin a commit, reproduce install in a VM,
+run the test suite, and inventory: every outbound network call, secret handling, **every
+self-modification path**, telemetry, computer-use action surface, mission isolation, real
+wake-to-ack p50/p95 on our hardware, and whether the critic loop measurably improves
+outcomes. Full checklist in `09-DECISIONS.md` D2.
+
+*Decision rule fixed in advance:* any self-modification path that can write to a running
+privileged process without a human diff → design only, reimplement. Wake-to-ack p95 >1.2s
+→ design only. Clean audit and a fast voice path → adopt as a pinned voice node with
+self-modification disabled at config and verified by test.
+
+**B. Control-plane bake-off** (decision D1). OpenClaw vs Hermes, both behind the same
+adapter, same model, same machine, 12 fixed tasks, rubric fixed in advance. Full spec in
+`10-CONTROL-PLANE-BAKEOFF.md`.
+
+Exit criteria:
+- Personal Jarvis audit complete; the decision rule applied, not renegotiated
+- Bake-off scored on all seven axes; result recorded in `09-DECISIONS.md` D1
+- **Two-week hard timebox.** If it runs long, the tiebreak applies (OpenClaw) and we move.
+
+---
+
 ## Phase 1 — One control plane + the digest
 **The first proactive surface, at the lowest possible risk.**
 
 Build:
-- Stand up **one** control plane (recommended: OpenClaw). Prove through the adapter:
-  session create, tool invoke, channel route, approvals, cancel, event stream.
+- Stand up the control plane chosen in Phase 0.5. Prove through the adapter: session
+  create, tool invoke, channel route, approvals, cancel, event stream.
 - Watch registry + delivery ledger
+- **First watch: CI / deploy health** (decision D3). Capabilities `ci.read_status` (A0),
+  `ci.read_logs` (A0, *quarantined ingest*), `ci.rerun_job` (A1, idempotent).
 - **Morning/evening digest** (trigger classes 3.1 + 3.6) — L1 autonomy, no live interrupts
 - Sleep-time consolidation job on a cheap model with a narrow tool set
 
+Boundary note on D3: CI *status* is trusted structured data; **check-run names, job logs and
+PR comment bodies are not** — anyone who can open a PR or install an app writes them. The
+trigger path is clean, but log summarization runs under the Untrusted Ingest Rule.
+
 Exit criteria:
 - Digest delivered daily for 14 consecutive days without manual intervention
+- Every red build in that window appears in the next digest — **watch miss rate 0**
 - User can enumerate every active watch and every fact the system holds about them
+- No live interruption fires: autonomy ceiling L1 holds under test
 - Cost per day measured and bounded
 
 ---

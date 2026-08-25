@@ -27,9 +27,11 @@ purpose: the contracts come before the integrations.
 | [06 — Roadmap](docs/06-ROADMAP.md) | Phased build order with testable exit criteria |
 | [07 — Evaluation](docs/07-EVALUATION.md) | Acceptance tests, including proactivity and adversarial suites |
 | [08 — Sources](docs/08-SOURCES.md) | Everything above, with verification status |
+| [09 — Decision Log](docs/09-DECISIONS.md) | What's been decided, why, and what would reverse it |
+| [10 — Control Plane Bake-Off](docs/10-CONTROL-PLANE-BAKEOFF.md) | The measured comparison that settles D1 |
 
 Start with **04** if you want the argument, **01** if you want the vision, **02** if you
-want the part nobody has built yet.
+want the part nobody has built yet, **09** if you want current state.
 
 ---
 
@@ -91,11 +93,21 @@ adapter.
 
 ---
 
-## Next decision points
+## Where we are
 
-Listed in [04 §8](docs/04-UNIFICATION-VIABILITY.md#8-open-questions-that-genuinely-need-a-decision).
-The load-bearing ones: which control plane, whether Personal Jarvis contributes code or
-only design, where canonical memory lives, and which surface comes first.
+| Decision | Status |
+|---|---|
+| **D1** Control plane — OpenClaw or Hermes | **Deferred to a measured bake-off.** Both are strong on opposite axes; learning loop and memory are the stated priority, so we measure rather than guess. Two-week timebox, tiebreak OpenClaw. [→ doc 10](docs/10-CONTROL-PLANE-BAKEOFF.md) |
+| **D2** Personal Jarvis — code or design | **Audit first**, with the decision rule written before the audit runs so it can't be rationalised afterwards. |
+| **D3** First proactive watch | **CI / deploy health.** Unambiguous threshold, real cost of missing it, trusted structured trigger input. |
+| **D4** Where the learning loop lives | **Our core**, emitting portable `SKILL.md` drafts — forced by D1. If it lived in a control plane, the bake-off would be unrunnable. |
+
+D4 is the one that shapes the code: deferring the control-plane choice *and* prioritising
+the learning loop together mean neither memory nor procedural learning can be rented. The
+"no vendor types in the core" invariant stops being aspirational and becomes load-bearing.
+
+**Next up:** Phase 0 (core contracts and the safety spine), then Phase 0.5 (the audit and
+the bake-off, in parallel).
 
 ---
 

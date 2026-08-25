@@ -109,6 +109,37 @@ Rules:
   cheaper model consolidates episodic → user_facts during idle windows, and writes to a
   review queue, not straight to canonical.
 
+### 4.1 The procedural learning loop (core-owned — decision D4)
+
+Learning "how we do this" is **ours**, not rented from a control plane. Forced by D1: if
+the loop lived inside OpenClaw or Hermes, switching control planes would mean abandoning
+it, and the bake-off in doc 10 would be unrunnable.
+
+```
+  completed task ─▶ execution trace
+                        │
+                        ▼  (sleep-time: cheap model, narrow tools)
+              candidate skill extraction
+                        │
+                        ▼
+                  SKILL.md  DRAFT ──▶ human diff & approve ──▶ skills/
+                                                                  │
+                                          any control plane loads it, unchanged
+```
+
+Rules:
+- **Drafts only.** R13 applies to our own learning loop exactly as much as to a vendor's.
+  Nothing writes a live skill into a running privileged system.
+- **Portable format.** `SKILL.md` / agentskills.io — the one capability artifact both
+  control-plane candidates already load.
+- **Extraction is sleep-time work**: narrower tool set than the foreground agent, cheaper
+  model, output to a review queue.
+- **Trace-driven, not outcome-driven.** The interesting signal is *why* a step failed, not
+  merely that it did. Hermes' self-evolution work (DSPy + GEPA over execution traces) is
+  the right quality bar to aim at — a technique to adopt, not a dependency to take.
+- A learned skill that misfires when a parameter changes is worse than no skill. Skill
+  robustness is measured explicitly (doc 10, task C2).
+
 ---
 
 ## 5. Policy Engine (L2)
