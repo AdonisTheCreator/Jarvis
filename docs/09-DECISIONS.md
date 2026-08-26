@@ -140,3 +140,113 @@ exceptions, including for whichever control plane wins. The control plane owns
 **What reverses it.** Evidence from the bake-off that a control plane's native learning
 loop measurably beats ours on the same tasks by a wide enough margin to justify lock-in.
 Doc 10 tests exactly this.
+
+---
+
+## D5 — **The Record and the Audit Ledger are one object**
+**Date:** 2026-08-25 · **Status:** Decided · **Detail:** [`11-THE-RECORD.md`](11-THE-RECORD.md)
+
+**Decision.** Full-fidelity capture of all agent activity — main chats, subagent
+transcripts, reasoning, every file edit, tool call, policy decision and delivery — is
+implemented as **one append-only, content-addressed event log with four read projections**:
+Audit, Recall, Reconstruct, Consolidate. The Audit Ledger from `05-ARCHITECTURE.md` §8 is
+now the Audit projection of the Record, not a separate store.
+
+**Why.** They were specified separately and would have been built separately — two write
+paths over the same facts, guaranteed to diverge, doubling the most expensive infrastructure
+in the system. The audit ledger already has to be append-only, tamper-evident and
+independent of the runtimes for safety reasons (R12); those are exactly the properties a
+trustworthy deep memory needs. Build it once at safety grade and memory inherits the
+integrity.
+
+**What it commits us to.**
+- The event schema, causal `parent` DAG, and **`subject_keys`** ship in **Phase 0**. None of
+  the three can be retrofitted onto an existing archive.
+- Payloads are encrypted per subject from the first write, so `forget()` works by
+  **crypto-shredding** — destroy the key, leave the ciphertext, preserve the log's hashes and
+  causal structure. Recognised as valid erasure by the EDPB, ICO and CNIL given AES-256-class
+  encryption and auditable, irreversible key destruction.
+- `forget()` must fan out through derived artefacts — embeddings, summaries and learned
+  skills leak what they were derived from. Provenance makes the fan-out computable.
+- Canonical memory (`05-ARCHITECTURE.md` §4) is redemoted to a *derived, curated* store over
+  the Record. The Record is ground truth; memory holds the conclusions.
+- Code state uses git, not our blob store — worktrees already give content-addressed history.
+  The Record keeps commit refs plus diffs of uncommitted intermediate states.
+
+**Storage reality check.** A full-fidelity year of every word Jarvis and its subagents
+produce is roughly **1 GB**. Media is the only real cost. Retention is a policy question, not
+a hardware one.
+
+**What reverses it.** Nothing foreseeable. If the log's write throughput becomes a
+bottleneck the projections can be split across stores, but the single write path stays.
+
+---
+
+## D6 — **The subconscious is retrieval and consolidation, not a fine-tune**
+**Date:** 2026-08-25 · **Status:** Decided · **Detail:** [`11-THE-RECORD.md`](11-THE-RECORD.md) §7–8
+
+**Decision.** The "subconscious" is a background service — a cheap local model with a narrow
+tool set, running on idle time — that maintains the index, consolidates episodes into
+candidate facts, extracts `SKILL.md` drafts from successful traces, mines failure patterns,
+and writes multi-granularity summaries. It is **not** a model fine-tuned on the archive.
+
+**Why not the fine-tune.** It bakes knowledge in lossily, is stale the moment a session ends,
+hallucinates confidently about *our own history* — the worst possible domain for confident
+invention — and, decisively, **it cannot honour `forget()`**: deleted content is smeared
+irreversibly across the weights. That alone disqualifies it under D5.
+
+**Where a fine-tune does earn its place, later.** Not on facts, on judgment: a small LoRA over
+our own accepted-vs-rejected routing decisions, salience scores and interruption outcomes.
+That's style and policy, regenerable from the Record, and it holds no knowledge to leak.
+
+**Two hard constraints, both enforced at the network layer rather than by prompt.**
+- **The subconscious has no egress. Ever.** It reads the most sensitive store in the system;
+  it must be structurally incapable of sending anything anywhere.
+- **`memory.recall` is a capability with an autonomy class and a scope**, not an ambient
+  ability. Scoped to current project + last N sessions by default; archive-wide search is a
+  separate, higher class; **a quarantined agent gets no recall at all.** The Record is the
+  highest-value exfiltration target in the system, and weaponizing agent memory for
+  exfiltration is a documented attack, not a hypothetical.
+- **Secret redaction happens at write time.** A credential that never enters the Record cannot
+  leak from it.
+
+**What reverses it.** Nothing on the fine-tune-for-facts question. The LoRA-for-judgment
+piece is scheduled work, not a reversal.
+
+---
+
+## D7 — **Integration triage: classify by what a thing wants to own**
+**Date:** 2026-08-25 · **Status:** Decided · **Detail:** [`13-INTEGRATION-TRIAGE.md`](13-INTEGRATION-TRIAGE.md)
+
+**Decision.** Every candidate addition is classified 1–6 by the layer it wants to own.
+Classes 1–3 (models, tools, skills) are near-free: explore constantly, no ceremony. Class 4
+(runtimes) needs a measured task class where it wins. Class 5 (control planes) goes through
+a bake-off. Class 6 (anything wanting memory, identity, policy or the ledger) is refused.
+
+**Why.** Curiosity is an asset and stack sprawl is a failure mode, and the difference between
+them is entirely about which layer the new thing claims. The standing test:
+*what breaks if we remove it in six months?*
+
+**The trap it exists to catch.** Things arrive looking like class 1 ("just a better model")
+and turn out to be class 5 ("…which brings its own runtime, memory and channels"). Classify
+by what it wants to own, never by how it's marketed.
+
+---
+
+## D8 — **Grok: add as a provider now; the real asset is X search, not the model**
+**Date:** 2026-08-25 · **Status:** Decided
+
+**Decision.** Grok is three things in three different triage classes:
+1. **Model** → class 1. Add as a provider; the router scores it against the others on
+   measured success, latency and cost. No architectural discussion needed.
+2. **Realtime X / social search** → class 2, and the genuinely differentiated one. Nothing
+   else in the stack can serve it. Becomes the capability `research.social_realtime` — run
+   under the Untrusted Ingest Rule without exception, since social content is maximally
+   hostile input.
+3. **Voice Agent API** → class 1, useful as a bridge and as the benchmark local voice must
+   beat. Not the destination: ~$3.00/hour means 2 h/day is ~$2,190/year, and it terminates the
+   always-on microphone path on someone else's server.
+
+**Why it's already answered.** The API has existed for a while — Grok 4.6, 500K context,
+roughly $2/M in and $6/M out. The interesting finding wasn't availability, it was that the
+model is the *least* differentiated of the three things.

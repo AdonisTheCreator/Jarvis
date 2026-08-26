@@ -29,6 +29,9 @@ purpose: the contracts come before the integrations.
 | [08 — Sources](docs/08-SOURCES.md) | Everything above, with verification status |
 | [09 — Decision Log](docs/09-DECISIONS.md) | What's been decided, why, and what would reverse it |
 | [10 — Control Plane Bake-Off](docs/10-CONTROL-PLANE-BAKEOFF.md) | The measured comparison that settles D1 |
+| [11 — The Record](docs/11-THE-RECORD.md) | Deep memory as one execution ledger: capture, retention, forgetting, the subconscious |
+| [12 — The Core Machine](docs/12-JARVIS-CORE-HARDWARE.md) | What the dedicated box is for, sized against the workload |
+| [13 — Integration Triage](docs/13-INTEGRATION-TRIAGE.md) | How to explore constantly without the stack sprawling |
 
 Start with **04** if you want the argument, **01** if you want the vision, **02** if you
 want the part nobody has built yet, **09** if you want current state.
@@ -56,6 +59,15 @@ The shipped proactive assistants are all overnight digests. Nobody has a good mo
 speech, and continuous state routed to the visual periphery so that audio is reserved for
 things that change what you do next. That, plus decades of HCI interruptibility research,
 is a real design. ([01](docs/01-JARVIS-CHARACTER-STUDY.md) §3–4, [02](docs/02-PROACTIVITY-RESEARCH.md))
+
+---
+
+**4. Deep memory and the audit ledger are the same object.**
+Full-fidelity capture of every chat, subagent trace, reasoning step and file edit is one
+append-only content-addressed event log with four read projections. The ledger already had to
+be tamper-evident and runtime-independent for safety; memory inherits that integrity for free.
+A year of every word the system produces is about a gigabyte — the ambition is cheap, and media
+retention is the only real cost. ([11](docs/11-THE-RECORD.md))
 
 ---
 
@@ -90,6 +102,8 @@ adapter.
 6. **Any agent reading untrusted content is quarantined**: no credentials, no egress, output is typed data only. ([05](docs/05-ARCHITECTURE.md) §5.5)
 7. **A proactive message that didn't change the next action is a defect** — and it is measured. ([07](docs/07-EVALUATION.md) §3)
 8. **The monitor is independent of the actor.** The kill switch cannot be reached by the agents it governs. ([05](docs/05-ARCHITECTURE.md) §5.4)
+9. **Forgetting works by destroying keys, not by rewriting history.** Per-subject encryption from the first write. ([11](docs/11-THE-RECORD.md) §6)
+10. **The subconscious has no network egress, and recall is a scoped capability.** The archive is the highest-value target in the system. ([11](docs/11-THE-RECORD.md) §8)
 
 ---
 
@@ -101,13 +115,19 @@ adapter.
 | **D2** Personal Jarvis — code or design | **Audit first**, with the decision rule written before the audit runs so it can't be rationalised afterwards. |
 | **D3** First proactive watch | **CI / deploy health.** Unambiguous threshold, real cost of missing it, trusted structured trigger input. |
 | **D4** Where the learning loop lives | **Our core**, emitting portable `SKILL.md` drafts — forced by D1. If it lived in a control plane, the bake-off would be unrunnable. |
+| **D5** Deep memory vs. the audit ledger | **One object.** An append-only, content-addressed event log with four projections — Audit, Recall, Reconstruct, Consolidate. Built once, at safety grade. |
+| **D6** The subconscious | **Retrieval and consolidation on idle time, not a fine-tune.** A fine-tune cannot honour `forget()`. No network egress, ever; recall is a scoped capability. |
+| **D7** How to evaluate anything new | **Triage by the layer it wants to own.** Models and skills are free — explore constantly. Control planes and memory-owners are not. |
+| **D8** Grok | **Add as a provider now.** The differentiated asset is realtime X search as a capability, not the model — and not the $3/hr voice API. |
 
-D4 is the one that shapes the code: deferring the control-plane choice *and* prioritising
-the learning loop together mean neither memory nor procedural learning can be rented. The
-"no vendor types in the core" invariant stops being aspirational and becomes load-bearing.
+Two of these shape the code more than the rest. **D4**: deferring the control-plane choice
+*and* prioritising the learning loop together mean neither memory nor procedural learning can
+be rented — "no vendor types in the core" stops being aspirational. **D5**: the event schema,
+causal DAG and per-subject encryption have to exist before the first event is written, because
+none of the three can be retrofitted onto an archive.
 
-**Next up:** Phase 0 (core contracts and the safety spine), then Phase 0.5 (the audit and
-the bake-off, in parallel).
+**Next up:** Phase 0 (core contracts, the Record, and the safety spine), then Phase 0.5 (the
+Personal Jarvis audit and the control-plane bake-off, in parallel).
 
 ---
 

@@ -54,6 +54,21 @@ because the user believes it is watching.
 - **Self-modification gate** — a runtime attempting to write its own skills/prompts/code
   lands in a draft queue and never in the live privileged system.
 
+## 4a. The Record and the subconscious (new — D5, D6)
+- **Recall scoping** — a scoped recall cannot reach outside its project/session window; a
+  **quarantined agent gets zero recall**, verified by test, not by policy prompt.
+- **Subconscious egress isolation** — verified at the **network layer**: the subconscious
+  process cannot reach any host. Asking the model whether it would is not a test.
+- **Forget fan-out** — `forget(subject)` renders payloads unreadable *and* tombstones index
+  entries *and* triggers re-derivation of every summary and skill whose provenance names the
+  subject. Assert the content is unrecoverable from derived artefacts too.
+- **Write-time redaction** — inject known credential patterns into tool results; assert they
+  never reach a stored payload.
+- **Log integrity** — hashes and causal links survive key destruction; tampering is detectable.
+- **Reconstruct honesty** — `checkpoint(T)` restores the reversible set and *lists* the
+  compensatable and irreversible sets. It must never imply the world went back.
+- **Recall is itself logged** — "what has Jarvis looked up about me?" is answerable.
+
 ## 5. Memory
 Correct retrieval; provenance present on every fact; user edits persist; `forget()`
 propagates through derived summaries; **no cross-project leakage**; consolidation writes to

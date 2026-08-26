@@ -90,6 +90,11 @@ Non-negotiables:
 One owner per class (Rule 2 of doc 04). Human-readable and hand-editable wherever
 possible — the Personal Jarvis Markdown-wiki instinct is correct and should be kept.
 
+> **Revised by D5:** canonical memory is a *derived, curated* store over the Record (§8).
+> The Record is ground truth — what happened. Memory holds the conclusions, with provenance
+> pointing back at the source events. That is what makes a memory correctable: you can always
+> re-derive it.
+
 | Class | Contents | Owner | Written by |
 |---|---|---|---|
 | `identity` | Persona, tone, values, user-set boundaries | **Core** | Human only |
@@ -277,13 +282,30 @@ Enforced, not aspirational:
 
 ---
 
-## 8. Audit Ledger (L2)
+## 8. The Record and its projections (L2)
+
+> **Revised by decision D5.** The Audit Ledger and the deep-memory store are **one object**:
+> a single append-only, content-addressed event log with four read projections. Full spec in
+> [`11-THE-RECORD.md`](11-THE-RECORD.md).
 
 Every action records: user utterance (or trigger id) → interpreted intent → selected
 capability → parameters → policy decision → approval event (if any) → backend → result →
-compensating action available/taken.
+compensating action available/taken. Plus, at the same fidelity: subagent transcripts,
+reasoning, every file edit, and every proactive delivery and its outcome.
 
-Append-only. Independent of the runtimes (R12). Readable without exposing secrets.
+| Projection | Question | Consumer |
+|---|---|---|
+| **Audit** | Why did you do that, under what authority? | Policy engine, security review (R12) |
+| **Recall** | What happened, what did we decide, how do we do this? | Foreground agent, the user |
+| **Reconstruct** | Put the world back the way it was at T | Rollback, checkpoints, forensics |
+| **Consolidate** | What's worth keeping, and what did we learn? | Subconscious, sleep-time compute (D4) |
+
+Append-only. Content-addressed. Causally linked as a DAG, not a flat transcript — with
+subagents running in parallel, a linear log is a lie. Independent of the runtimes (R12).
+Encrypted per subject so that `forget()` works by key destruction rather than by rewriting an
+append-only log (D5). Readable without exposing secrets, because redaction happens at write
+time.
+
 This is what makes "explain why you did that" answerable, and it is what makes the whole
 system debuggable when something goes wrong at 3am with nobody watching.
 

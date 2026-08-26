@@ -14,7 +14,11 @@ Build:
 - Capability descriptor schema + registry (start with 3 capabilities, all A0/A1)
 - `AgentBackend` adapter interface with idempotency keys
 - **Policy Engine**: autonomy classes A0–A4, approval tokens (action+target+params+expiry+single-use)
-- **Audit Ledger**: append-only, independent process
+- **The Record** (D5): append-only content-addressed event log, causal `parent` DAG,
+  `subject_keys` on every event, **per-subject encryption from the first write**, and the
+  Audit projection over it. Independent process. *None of the schema can be retrofitted —
+  this is why it is Phase 0 and not later.*
+- Write-time secret redaction on tool results
 - **Kill switch**: out-of-band, model-independent, with a scheduled test
 - **Untrusted Ingest Rule** implemented as an enforced quarantine role, not a convention
 - Canonical Memory with provenance + a working `forget()`
@@ -24,7 +28,9 @@ Exit criteria:
 - Kill switch halts everything in <2s, verified from a test harness
 - A quarantined agent handed adversarial content emits a `Proposal` and invokes **no**
   capability — three injection fixtures, all passing
-- Every action reconstructible from the ledger alone
+- Every action reconstructible from the Record alone
+- `forget(subject)` destroys the key, renders payloads unreadable, leaves hashes and causal
+  links intact, and fans out to derived artefacts — verified by test
 
 ---
 
