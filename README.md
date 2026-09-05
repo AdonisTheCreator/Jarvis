@@ -13,8 +13,19 @@ the charter translates that dedication into seven binding engineering constraint
 
 ## Where this stands
 
-This repository currently holds the **research and architecture phase**. No code yet, on
-purpose: the contracts come before the integrations.
+This repository holds the **research, architecture and offline contract prototype**.
+The first executable milestone simulates implementation → review and cancellation;
+it does not yet connect to live agents. **Hermes is our first prototype choice** (D9),
+with Codex, Claude Code, Traycer and Claude Desktop integration work mapped in
+[14 — Hermes-first milestone](docs/14-HERMES-FIRST-MILESTONE.md).
+
+Run with Python 3.11+ (no third-party dependencies):
+
+```bash
+python -m jarvis.demo
+python -m jarvis.demo --cancel
+python -m unittest discover -s tests -v
+```
 
 | Doc | What it answers |
 |---|---|
@@ -32,6 +43,7 @@ purpose: the contracts come before the integrations.
 | [11 — The Record](docs/11-THE-RECORD.md) | Deep memory as one execution ledger: capture, retention, forgetting, the subconscious |
 | [12 — The Core Machine](docs/12-JARVIS-CORE-HARDWARE.md) | What the dedicated box is for, sized against the workload |
 | [13 — Integration Triage](docs/13-INTEGRATION-TRIAGE.md) | How to explore constantly without the stack sprawling |
+| [14 — Hermes-first Milestone](docs/14-HERMES-FIRST-MILESTONE.md) | Runnable offline prototype, integration paths, and gates to a spoken coding workflow |
 
 Start with **04** if you want the argument, **01** if you want the vision, **02** if you
 want the part nobody has built yet, **09** if you want current state.
@@ -111,7 +123,7 @@ adapter.
 
 | Decision | Status |
 |---|---|
-| **D1** Control plane — OpenClaw or Hermes | **Deferred to a measured bake-off.** Both are strong on opposite axes; learning loop and memory are the stated priority, so we measure rather than guess. Two-week timebox, tiebreak OpenClaw. [→ doc 10](docs/10-CONTROL-PLANE-BAKEOFF.md) |
+| **D1 / D9** Control plane — OpenClaw or Hermes | **Hermes-first prototype.** Production selection remains evidence-based. D9 supersedes the mandatory full bake-off prerequisite and automatic OpenClaw tiebreak. [→ doc 14](docs/14-HERMES-FIRST-MILESTONE.md) |
 | **D2** Personal Jarvis — code or design | **Audit first**, with the decision rule written before the audit runs so it can't be rationalised afterwards. |
 | **D3** First proactive watch | **CI / deploy health.** Unambiguous threshold, real cost of missing it, trusted structured trigger input. |
 | **D4** Where the learning loop lives | **Our core**, emitting portable `SKILL.md` drafts — forced by D1. If it lived in a control plane, the bake-off would be unrunnable. |
@@ -126,8 +138,9 @@ be rented — "no vendor types in the core" stops being aspirational. **D5**: th
 causal DAG and per-subject encryption have to exist before the first event is written, because
 none of the three can be retrofitted onto an archive.
 
-**Next up:** Phase 0 (core contracts, the Record, and the safety spine), then Phase 0.5 (the
-Personal Jarvis audit and the control-plane bake-off, in parallel).
+**Next up:** the supervised execution boundary and native worker adapters in
+[doc 14](docs/14-HERMES-FIRST-MILESTONE.md), followed by Hermes text/voice integration.
+The offline prototype does not satisfy the remaining Phase 0 production safety gates.
 
 ---
 

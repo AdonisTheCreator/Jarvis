@@ -1,0 +1,9 @@
+[project]
+name = "jarvis-contract-prototype"
+version = "0.1.0"
+description = "Offline task lifecycle prototype for Jarvis"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

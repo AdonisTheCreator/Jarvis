@@ -1,5 +1,12 @@
 # 10 — Control Plane Bake-Off
 
+> **Historical rubric — superseded in part by D9 (2026-09-05).** Keep the task
+> inventory below for tests. Hermes is now the first fixture prototype; a completed
+> custom learning engine and full comparison are not prerequisites. The scoring
+> rubric, automatic OpenClaw tiebreak and timebox fallback below are retained as
+> historical context and must not be applied. See doc 14 for the current evaluation
+> approach; write the revised scoring rubric before running a comparative benchmark.
+
 *Implements decision **D1**. Runs in Phase 0.5, after the core contracts exist and before
 any control plane is running in anger. Two candidates, one adapter interface, a fixed task
 set, and a scoring rubric written **before** the results come in.*
