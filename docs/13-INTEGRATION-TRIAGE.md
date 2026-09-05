@@ -75,11 +75,12 @@ when a real question needs it, and treat the voice API as a stopgap rather than 
 | Claude / OpenAI / Gemini / Grok models | 1 | Add freely; route by measurement |
 | Home Assistant | 2 | Adapter. Its automations *are* our threshold watches |
 | Tesla Fleet API | 2 | Adapter, phase 7, A3 actions behind Protocols |
-| Traycer | 4 | Only if parallel worktree topology needs it |
-| Claude Code / Codex | 4 | Harness adapters, phase 4, measured per task class |
+| Traycer | 4 | D9: planned team workspace via CLI; verify external task bootstrap and cancellation before adoption |
+| Claude Code / Codex | 4 | D9: native worker adapters in the first coding milestone; begin with disposable fixtures |
+| Claude Desktop | 2 as a Jarvis tool client | D9: MCP connector first; reverse Desktop control is unverified and separate |
 | LangGraph | 4 | Durable execution substrate only — never a second router |
 | Letta | 6 → rejected as product, adopted as pattern | Sleep-time compute is ours (D4) |
-| OpenClaw / Hermes | 5 | Bake-off, doc 10 |
+| OpenClaw / Hermes | 5 | D9: Hermes-first prototype, OpenClaw comparison on required capability gaps; doc 14 |
 | Personal Jarvis | 5 if adopted whole, 2 as a voice node | Audit first (D2) |
 | VisionClaw | 2 | Sensor node pattern; reference implementation |
 

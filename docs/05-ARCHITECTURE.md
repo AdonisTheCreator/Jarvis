@@ -1,5 +1,11 @@
 # 05 — Refined Architecture
 
+> **2026-09-05, D9:** Hermes is the first prototype control plane. Doc 14 brings
+> the coding workflow forward as a staged fixture experiment. Core ownership of
+> memory means portable approved knowledge; Hermes may generate learning proposals
+> before a custom extraction engine exists. This document describes the target
+> architecture, not the capabilities of the current offline simulation.
+
 *This supersedes §8–§12 and §24 of the source blueprint. It keeps the good parts
 (capability routing, adapter contract, memory classes, risk tiers) and adds the four
 things that were missing: the Proactivity Plane, Protocols, the Untrusted Ingest boundary,

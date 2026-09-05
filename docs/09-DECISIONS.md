@@ -250,3 +250,42 @@ by what it wants to own, never by how it's marketed.
 **Why it's already answered.** The API has existed for a while — Grok 4.6, 500K context,
 roughly $2/M in and $6/M out. The interesting finding wasn't availability, it was that the
 model is the *least* differentiated of the three things.
+
+---
+
+## D9 — **Hermes-first prototype and native coding workers**
+**Date:** 2026-09-05 · **Status:** Accepted direction; implementation staged ·
+**Supersedes:** D1's prototype prerequisite and migration tiebreak; D4's requirement
+to implement custom extraction before evaluation; doc 10's historical scoring and
+automatic fallback. Core ownership and production safety obligations remain.
+
+**Decision.** Prototype Hermes first, with separate native Claude Code and Codex
+worker adapters. Test its native Codex runtime as an alternative configuration,
+accounting for documented delegation/memory tool limitations. Bring a disposable
+coding fixture workflow forward before the full device roadmap. Traycer is the
+planned visible team workspace behind a scoped adapter. Claude Desktop initially
+connects as a client of Jarvis tools through MCP; reverse control is unverified.
+
+**Why.** The user prioritized plain-language task completion, real access to coding
+agents, Traycer collaboration, and Hermes. Current documentation establishes
+programmable Claude Code/Codex interfaces and a Traycer CLI. We can evaluate the
+useful workflow before building every long-term subsystem. Documentation support
+is not a passed runtime test.
+
+**What it commits us to.**
+- One execution owner per job; no duplicate direct and Traycer-owned dispatch.
+- An offline simulation first, then supervised fixture workers, native adapters,
+  Hermes text/voice, Traycer and Desktop. Detailed gates in doc 14.
+- Confirm worker/descendant stop before reporting cancellation. Unknown external
+  state blocks new work until reconciled; never silently relaunch after a timeout.
+- Keep approved knowledge and provenance portable. Evaluate Hermes' learning
+  proposals now without claiming a custom learning engine already exists.
+- No production/private-data capture before the encrypted Record and scoped memory
+  path exist. The current in-memory synthetic event list is not that Record.
+- Preserve the charter and Phase 0 live-execution gates. No benchmark victory or
+  production readiness is claimed by this decision.
+
+**What reverses it.** Hermes fails a required worker, stop, session, voice or memory
+portability test, or demands more adapter complexity than the same fixture on
+OpenClaw. Run that comparison with pinned versions and a rubric written beforehand.
+An importer direction or expired timebox is insufficient to pick a winner.

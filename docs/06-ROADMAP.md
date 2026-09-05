@@ -1,5 +1,15 @@
 # 06 — Roadmap (Reordered)
 
+> **Current execution order — D9, 2026-09-05:** begin the
+> [Hermes-first coding milestone](14-HERMES-FIRST-MILESTONE.md): offline contracts →
+> supervised fixture workers → native Claude Code/Codex → Hermes text and voice →
+> Traycer and Claude Desktop connector. This brings a bounded part of Phase 4 forward.
+> The phases below remain the broader production roadmap. Phase 0's real-data,
+> policy, isolation and independent-stop gates remain in force; a synthetic demo
+> does not satisfy them. The full comparison and custom learning implementation are
+> no longer prerequisites to a Hermes fixture prototype, and no automatic OpenClaw
+> tiebreak applies.
+
 *The source blueprint's roadmap is broadly sensible but ordered wrong in two places:
 safety is Phase 8 and proactivity is Phase 6. Both belong at the front — safety because a
 proactive agent cannot be retrofitted safe, and proactivity because it is the product.
@@ -55,7 +65,8 @@ adapter, same model, same machine, 12 fixed tasks, rubric fixed in advance. Full
 Exit criteria:
 - Personal Jarvis audit complete; the decision rule applied, not renegotiated
 - Bake-off scored on all seven axes; result recorded in `09-DECISIONS.md` D1
-- **Two-week hard timebox.** If it runs long, the tiebreak applies (OpenClaw) and we move.
+- **Timebox the investigation.** D9 removes the automatic OpenClaw outcome; an
+  incomplete comparison is reported as incomplete. Keep production selection open.
 
 ---
 
