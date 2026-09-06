@@ -289,3 +289,36 @@ is not a passed runtime test.
 portability test, or demands more adapter complexity than the same fixture on
 OpenClaw. Run that comparison with pinned versions and a rubric written beforehand.
 An importer direction or expired timebox is insufficient to pick a winner.
+
+---
+
+## D10 — **Local voice, explicit model modes, concurrent jobs and connectable apps**
+**Date:** 2026-09-06 · **Status:** Accepted design direction; integrations pending
+
+**Decision.** Use local wake detection and aim for local streaming transcription
+without per-minute service fees. Benchmark Moonshine and Nemotron before selecting.
+Evaluate a local everyday conversation model; expose hosted reasoning as explicit
+foreground modes or scoped delegated jobs. Keep identity, constraints and task state
+portable. Model readiness and completed actions must be verified before announcement.
+
+Adopt doc 16's ten flows as the acceptance-scenario inventory, starting with 1, 2,
+3 and 10. Add explicit designs for offline phone operation, cross-device handoff,
+request revisions, task groups and cancellation after external commitment.
+
+Design future apps we own with versioned, scoped APIs/tools, observable progress,
+operation receipts, idempotency and declared cancellation/undo behavior. Computer
+use is a fallback; universal third-party connectivity is not assumed.
+
+**Why.** The user endorsed a continuous voice assistant that preserves focus while
+multiple app workflows run, supports spoken model changes, and connects easily to
+their own future apps. They explicitly asked to log the research and all ten flows.
+
+**What it commits us to.** Docs 15 and 16 preserve research, example interactions,
+feasibility and limitations. Local-only mode must not silently route to the cloud.
+Checking status does not authorize a purchase. Acknowledgement is not completion,
+and stopping audio is not stopping a worker. No new live integrations are claimed.
+
+**What reverses it.** Target-device benchmarks may change model/device choices or
+show a required capability needs a different adapter. Provider/API limitations may
+change routes. Those findings do not silently relax user authority or truthfulness
+about execution state.

@@ -44,6 +44,8 @@ python -m unittest discover -s tests -v
 | [12 — The Core Machine](docs/12-JARVIS-CORE-HARDWARE.md) | What the dedicated box is for, sized against the workload |
 | [13 — Integration Triage](docs/13-INTEGRATION-TRIAGE.md) | How to explore constantly without the stack sprawling |
 | [14 — Hermes-first Milestone](docs/14-HERMES-FIRST-MILESTONE.md) | Runnable offline prototype, integration paths, and gates to a spoken coding workflow |
+| [15 — Voice, Models & App Connections](docs/15-VOICE-MODELS-AND-APP-CONNECTIONS.md) | Local transcription research, spoken model modes, phone/home devices and an integration pattern for our apps |
+| [16 — Ten Acceptance Flows](docs/16-TEN-ACCEPTANCE-FLOWS.md) | Ten user-endorsed scenarios, feasibility, failure cases and first live acceptance targets |
 
 Start with **04** if you want the argument, **01** if you want the vision, **02** if you
 want the part nobody has built yet, **09** if you want current state.
