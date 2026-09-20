@@ -6,7 +6,7 @@ from jarvis_core.backend import (
     AgentBackend, Estimate, HealthStatus, Task, TaskHandle, TaskState, TaskStatus,
 )
 from jarvis_core.capability import Capability, CapabilityRegistry
-from jarvis_core.idempotency import IdempotencyLedger
+from jarvis_core.idempotency import ClaimState, IdempotencyLedger
 from jarvis_core.errors import ApprovalRequired, PolicyDenied
 from jarvis_core.ids import new_ulid
 from jarvis_core.policy import PolicyEngine, Request
@@ -408,24 +408,30 @@ class TestFourthReviewFindings:
         """Keys hash the action, so a retry shares its predecessor's key. A
         dead handle left bound would release the retry's live claim, and a
         third attempt would duplicate the side effect."""
-        class Failing(FakeBackend):
+        states = iter([TaskState.FAILED, TaskState.PENDING, TaskState.PENDING])
+
+        class Varying(FakeBackend):
             def status(self, handle):
-                return TaskStatus(handle=handle, state=TaskState.FAILED)
+                return TaskStatus(handle=handle, state=next(states, TaskState.PENDING))
 
         router = CapabilityRouter(registry, engine, store)
-        backend = Failing("primary", ["ci.rerun_job"])
+        backend = Varying("primary", ["ci.rerun_job"])
         router.register_backend(backend)
         request = Request("ci.rerun_job", "j", {"job_id": "j"})
 
         first = router.invoke(request)          # fails -> claim released
         assert first.claim is ClaimOutcome.RELEASED
-        second = router.invoke(request)         # legitimate retry
-        # Settling the *dead* handle must not touch the live retry's claim.
-        assert router.settle(first, backend) is ClaimOutcome.NOT_APPLICABLE
-        assert second.idempotency_key is not None
+        second = router.invoke(request)         # legitimate retry, still running
+        assert second.claim is ClaimOutcome.PENDING
 
-    def test_handles_are_namespaced_by_backend(self, registry, engine, store):
-        """Backends may mint colliding local ids like 'job-1'."""
+        # Settling the *dead* handle must not touch the live retry's claim, and
+        # must say which case this is rather than reporting "no claim".
+        assert router.settle(first, backend) is ClaimOutcome.UNKNOWN
+        assert router.outstanding_claims() == [second.idempotency_key]
+
+    def test_a_backend_reusing_a_handle_id_is_refused_loudly(self, registry, engine, store):
+        """Silently overwriting the binding strands the first claim forever.
+        Raising surfaces the adapter bug while it is still cheap to find."""
         class Fixed(FakeBackend):
             def execute(self, task, idempotency_key=None):
                 self.executions.append((task, idempotency_key))
@@ -437,12 +443,17 @@ class TestFourthReviewFindings:
 
         router = CapabilityRouter(registry, engine, store)
         router.register_backend(Fixed("alpha", ["ci.rerun_job"]))
-        alpha = next(b for b in router._backends if b.id == "alpha")
         first = router.invoke(Request("ci.rerun_job", "a", {"job_id": "a"}))
-        second = router.invoke(Request("ci.rerun_job", "b", {"job_id": "b"}))
-        # Same handle id, different actions: bindings must not collide.
-        assert first.handle.id == second.handle.id == "job-1"
+        with pytest.raises(ValueError, match="already bound to a different claim"):
+            router.invoke(Request("ci.rerun_job", "b", {"job_id": "b"}))
+
+        # The first claim is untouched and still resolvable...
+        assert router.settle(first, next(b for b in router._backends)) is ClaimOutcome.PENDING
+        # ...and the second's effect landed, so its claim is held and visible
+        # rather than silently lost, with the conflict recorded.
         assert len(router.outstanding_claims()) == 2
+        errors = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])]
+        assert errors[-1].meta["error"] == "handle_binding_conflict"
 
     def test_bindings_survive_a_router_restart(self, registry, engine, store):
         """The ledger is the durable side; an in-process map would lose this
@@ -460,6 +471,46 @@ class TestFourthReviewFindings:
         fresh = CapabilityRouter(registry, engine, store, ledger)
         fresh.register_backend(backend)
         assert fresh.settle(result, backend) is ClaimOutcome.PENDING
+
+
+class TestFifthReviewFindings:
+    """Regression coverage for the fifth round."""
+
+    def test_no_claim_is_distinguishable_from_a_stranded_one(self, router):
+        """A poll loop must tell 'read-only' from 'the claim is stuck'."""
+        read_only = router.invoke(Request("ci.read_status", "repo"))
+        backend = next(b for b in router._backends if b.id == "primary")
+        assert router.settle(read_only, backend) is ClaimOutcome.NOT_APPLICABLE
+        assert ClaimOutcome.NOT_APPLICABLE.needs_attention is False
+        assert ClaimOutcome.UNKNOWN.needs_attention is True
+        assert ClaimOutcome.STUCK.needs_attention is True
+
+    def test_a_stranded_claim_can_be_released_through_the_public_api(
+        self, registry, engine, store
+    ):
+        class Interrupted(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.INTERRUPTED)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Interrupted("stopped", ["ci.rerun_job"]))
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert router.outstanding_claims() == [result.idempotency_key]
+        assert router.release_claim(result.idempotency_key) is True
+        assert router.outstanding_claims() == []
+
+    def test_a_stale_poll_cannot_resolve_a_newer_attempt(self, registry, engine, store):
+        """Without generations, a late complete() buries a re-claim: release()
+        then no-ops and the action is suppressed forever."""
+        ledger = IdempotencyLedger()
+        key = "k"
+        first = ledger.claim(key)
+        assert ledger.release(key, generation=first.generation) is True
+        second = ledger.claim(key)
+        # A poll from the first attempt must not touch the second.
+        assert ledger.complete(key, "old-result", generation=first.generation) is False
+        assert ledger.state(key) is ClaimState.IN_FLIGHT
+        assert ledger.complete(key, "new-result", generation=second.generation) is True
 
 
 class TestScriptedWorkload:

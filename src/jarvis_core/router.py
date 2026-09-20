@@ -25,7 +25,7 @@ from enum import StrEnum
 from .backend import AgentBackend, Estimate, Task, TaskHandle, TaskState
 from .capability import Capability, CapabilityRegistry
 from .errors import ApprovalRequired, JarvisCoreError, PolicyDenied
-from .idempotency import IdempotencyLedger, derive_key
+from .idempotency import ClaimState, IdempotencyLedger, derive_key
 from .policy.engine import Decision, Outcome, PolicyEngine, Request
 from .record import Actor, EventKind, RecordStore, make_event
 
@@ -62,6 +62,12 @@ class ClaimOutcome(StrEnum):
 
     NOT_APPLICABLE = "not_applicable"
     """The capability is not side-effecting; there was never a claim."""
+    ALREADY_RESOLVED = "already_resolved"
+    """The claim was completed or released earlier; nothing left to do."""
+    UNKNOWN = "unknown"
+    """A claim is held but its binding is missing, so this handle cannot
+    resolve it. Distinct from NOT_APPLICABLE on purpose: a poll loop must be
+    able to tell 'there was no claim' from 'the claim is stranded'."""
     COMPLETED = "completed"
     RELEASED = "released"
     """Definitively did not take effect. A retry is legitimate."""
@@ -74,6 +80,11 @@ class ClaimOutcome(StrEnum):
     def resolved(self) -> bool:
         """True when polling can stop."""
         return self is not ClaimOutcome.PENDING
+
+    @property
+    def needs_attention(self) -> bool:
+        """True when a human has to resolve it; no amount of polling will."""
+        return self in {ClaimOutcome.STUCK, ClaimOutcome.UNKNOWN}
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,7 +285,31 @@ class CapabilityRouter:
             raise
 
         if key is not None:
-            self._idempotency.bind(key, _handle_ref(backend, handle))
+            try:
+                self._idempotency.bind(key, _handle_ref(backend, handle))
+            except ValueError as exc:
+                # The effect already landed, so the claim must stay held -- but
+                # it is now unresolvable through this handle. Record that
+                # plainly; outstanding_claims() surfaces it for a human.
+                self._record.append(
+                    make_event(
+                        EventKind.TOOL_ERROR,
+                        actor=Actor.SYSTEM,
+                        session=request.session,
+                        subject_keys=task.subject_keys or ("system",),
+                        parent=[event.event.id],
+                        meta={
+                            "capability": request.capability,
+                            "backend": backend.id,
+                            "error": "handle_binding_conflict",
+                            "detail": str(exc),
+                            "idempotency_key": key,
+                            "effect_uncertain": True,
+                            "claim": ClaimOutcome.UNKNOWN.value,
+                        },
+                    )
+                )
+                raise
         state = self._state_of(backend, handle)
         outcome = self._settle_claim(key, state, handle)
         # ``state is None`` means status() raised: we do not know what happened,
@@ -335,9 +370,14 @@ class CapabilityRouter:
             )
         bound = self._idempotency.key_for(_handle_ref(backend, invocation.handle))
         if bound is None:
-            # The claim was already completed or released; the binding went with
-            # it. Settling again would resolve a *later* attempt sharing the key.
-            return ClaimOutcome.NOT_APPLICABLE
+            state = self._idempotency.state(invocation.idempotency_key)
+            if state is not ClaimState.IN_FLIGHT:
+                # Completed or released earlier; the binding went with it.
+                # Settling again would resolve a *later* attempt sharing the key.
+                return ClaimOutcome.ALREADY_RESOLVED
+            # A claim is held but this handle cannot resolve it. Say so rather
+            # than reporting the same value as genuinely read-only work.
+            return ClaimOutcome.UNKNOWN
         if bound != invocation.idempotency_key:
             raise ValueError(
                 "handle is bound to a different claim than this invocation; "
@@ -346,6 +386,16 @@ class CapabilityRouter:
         return self._settle_claim(
             bound, self._state_of(backend, invocation.handle), invocation.handle
         )
+
+    def release_claim(self, key: str) -> bool:
+        """Manually free a stranded claim.
+
+        The counterpart to :meth:`outstanding_claims`: without it, a claim that
+        no handle can resolve could only be cleared by reaching into the
+        ledger. Use only when the side effect provably did not happen -- a
+        wrongly released claim sends the message twice.
+        """
+        return self._idempotency.release(key)
 
     def outstanding_claims(self) -> list[str]:
         """Idempotency keys held but unresolved.
@@ -447,13 +497,18 @@ class CapabilityRouter:
         """Complete or release a claim, covering every terminal state."""
         if key is None:
             return ClaimOutcome.NOT_APPLICABLE
+        generation = self._idempotency.generation(key)
         if state is TaskState.SUCCEEDED:
             # Keep the result reference: DONE means "return what happened
             # before", which is impossible without it.
-            self._idempotency.complete(key, handle.id if handle else None)
+            if not self._idempotency.complete(
+                key, handle.id if handle else None, generation=generation
+            ):
+                return ClaimOutcome.ALREADY_RESOLVED
             return ClaimOutcome.COMPLETED
         if state in {TaskState.FAILED, TaskState.CANCELLED}:
-            self._release(key)
+            if not self._idempotency.release(key, generation=generation):
+                return ClaimOutcome.ALREADY_RESOLVED
             return ClaimOutcome.RELEASED
         if state is TaskState.INTERRUPTED:
             # Terminal, but the effect may have partly landed. Hold the claim

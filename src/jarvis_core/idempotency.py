@@ -29,6 +29,9 @@ class Claim:
     key: str
     state: ClaimState
     result_ref: str | None = None
+    generation: int = 0
+    """Increments on every fresh claim, so a late poll cannot resolve a newer
+    attempt that happens to share the key."""
 
     @property
     def should_execute(self) -> bool:
@@ -84,19 +87,28 @@ class IdempotencyLedger:
     def __init__(self) -> None:
         self._states: dict[str, Claim] = {}
         self._handles: dict[str, str] = {}
+        self._generations: dict[str, int] = {}
         self._lock = threading.Lock()
 
     def claim(self, key: str) -> Claim:
-        """Atomically claim ``key``. Only a FRESH claim may execute."""
+        """Atomically claim ``key``. Only a FRESH claim may execute.
+
+        Each successful claim gets a new *generation*. A late poll carrying an
+        older generation cannot resolve a newer attempt -- without that, a
+        stale ``complete()`` marks a re-claim DONE, ``release()`` then no-ops,
+        and the action is suppressed permanently.
+        """
         with self._lock:
             existing = self._states.get(key)
             if existing is not None:
                 return existing
-            claim = Claim(key=key, state=ClaimState.IN_FLIGHT)
-            self._states[key] = claim
-            return Claim(key=key, state=ClaimState.FRESH)
+            self._generations[key] = self._generations.get(key, 0) + 1
+            self._states[key] = Claim(
+                key=key, state=ClaimState.IN_FLIGHT, generation=self._generations[key]
+            )
+            return Claim(key=key, state=ClaimState.FRESH, generation=self._generations[key])
 
-    def bind(self, key: str, handle_ref: str) -> None:
+    def bind(self, key: str, handle_ref: str, *, generation: int | None = None) -> None:
         """Associate a backend handle with a claim.
 
         Lives here rather than in the router because the ledger is the durable
@@ -108,29 +120,56 @@ class IdempotencyLedger:
         polling B releases A.
         """
         with self._lock:
+            existing = self._handles.get(handle_ref)
+            if existing is not None and existing != key:
+                # Two live claims cannot share a handle reference. Silently
+                # overwriting strands the first one forever; raising surfaces
+                # the adapter bug (usually a backend minting duplicate ids)
+                # while it is still cheap to find.
+                raise ValueError(
+                    f"handle {handle_ref!r} is already bound to a different claim; "
+                    "a backend must not reuse a handle id for two in-flight actions"
+                )
             self._handles[handle_ref] = key
 
     def key_for(self, handle_ref: str) -> str | None:
         with self._lock:
             return self._handles.get(handle_ref)
 
-    def complete(self, key: str, result_ref: str | None = None) -> None:
+    def complete(self, key: str, result_ref: str | None = None, *, generation: int | None = None) -> bool:
+        """Mark a claim done. Returns False if it was already superseded."""
         with self._lock:
-            self._states[key] = Claim(key=key, state=ClaimState.DONE, result_ref=result_ref)
+            current = self._states.get(key)
+            if current is None or current.state is not ClaimState.IN_FLIGHT:
+                return False
+            if generation is not None and current.generation != generation:
+                return False  # a stale poll from an earlier attempt
+            self._states[key] = Claim(
+                key=key, state=ClaimState.DONE, result_ref=result_ref,
+                generation=current.generation,
+            )
             self._unbind(key)
+            return True
 
-    def release(self, key: str) -> None:
+    def release(self, key: str, *, generation: int | None = None) -> bool:
         """Abandon a claim after a failure that did *not* take effect.
 
         Call this only when the side effect provably did not happen. When in
         doubt, leave the claim in flight: a stuck claim needs a human, a
         wrongly released one sends the message twice.
+
+        Returns False when there was nothing to release, or when the caller's
+        generation has been superseded by a newer attempt.
         """
         with self._lock:
             current = self._states.get(key)
-            if current is not None and current.state is ClaimState.IN_FLIGHT:
-                del self._states[key]
-                self._unbind(key)
+            if current is None or current.state is not ClaimState.IN_FLIGHT:
+                return False
+            if generation is not None and current.generation != generation:
+                return False
+            del self._states[key]
+            self._unbind(key)
+            return True
 
     def _unbind(self, key: str) -> None:
         """Drop every handle pointing at ``key``. Caller holds the lock.
@@ -160,3 +199,8 @@ class IdempotencyLedger:
         with self._lock:
             claim = self._states.get(key)
             return claim.state if claim else None
+
+    def generation(self, key: str) -> int | None:
+        with self._lock:
+            claim = self._states.get(key)
+            return claim.generation if claim else None
