@@ -60,6 +60,10 @@ src/jarvis_core/
 - **Jev decides; the Policy Engine authorizes.** A calibrated probability is
   never an approval.
 - **Runtimes propose memory; the core writes it.**
+- **A recall scope is granted, not chosen.** `RecallProjection` takes a
+  `RecallAuthority`; the caller asks for a scope and something else decides.
+  The Record is the highest-value exfiltration target in the system, so a
+  scope the caller picks for itself is not a scope.
 - **A guard must be able to fail.** Three separate bugs here were guards that
   could not: a generation check that was inert, a `leaks()` diagnostic that
   could not detect the broken fan-out it existed to detect, and a kill switch
@@ -77,7 +81,7 @@ src/jarvis_core/
 ## Commands
 
 ```bash
-python3 -m pytest -q          # 343 tests, ~1.3s
+python3 -m pytest -q          # 347 tests, ~1.3s
 python3 -m pytest tests/test_invariants.py    # the vendor-freedom check
 ```
 

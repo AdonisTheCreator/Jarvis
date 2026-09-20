@@ -2,10 +2,20 @@
 import pytest
 
 from jarvis_core.record import Actor, EventKind, RecordStore, make_event
+from jarvis_core.errors import PolicyDenied
 from jarvis_core.record.projections import (
     AuditProjection, Checkpoint, ConsolidateProjection, RecallProjection,
-    RecallScope, ReconstructProjection,
+    RecallScope, ReconstructProjection, ScopeGrants,
 )
+
+
+#: A test actor granted every scope, so tests about *searching* are not
+#: also tests about authorization. The authorization tests name their own.
+ANY_SCOPE = ScopeGrants({"user": frozenset(RecallScope)})
+
+
+def recall(store, authority=ANY_SCOPE) -> RecallProjection:
+    return RecallProjection(store, authority)
 
 
 def add(store, kind, *, parent=(), subjects=("project:jarvis",), payload=None, meta=None):
@@ -44,24 +54,26 @@ class TestAudit:
 class TestRecall:
     def test_quarantined_scope_returns_nothing(self, store: RecordStore):
         add(store, EventKind.USER_TURN, payload=b"the auth decision")
-        assert RecallProjection(store).search("auth", scope=RecallScope.NONE) == []
+        assert recall(store).search("auth", actor="user", scope=RecallScope.NONE) == []
 
     def test_project_scope_excludes_other_projects(self, store: RecordStore):
         add(store, EventKind.USER_TURN, subjects=["project:jarvis"], payload=b"auth decision")
         add(store, EventKind.USER_TURN, subjects=["project:other"], payload=b"auth decision")
-        hits = RecallProjection(store).search("auth", scope=RecallScope.PROJECT, project="jarvis")
+        hits = recall(store).search(
+            "auth", actor="user", scope=RecallScope.PROJECT, project="jarvis"
+        )
         assert len(hits) == 1
 
     def test_archive_scope_reaches_everything(self, store: RecordStore):
         add(store, EventKind.USER_TURN, subjects=["project:jarvis"], payload=b"auth decision")
         add(store, EventKind.USER_TURN, subjects=["project:other"], payload=b"auth decision")
-        assert len(RecallProjection(store).search("auth", scope=RecallScope.ARCHIVE)) == 2
+        assert len(recall(store).search("auth", actor="user", scope=RecallScope.ARCHIVE)) == 2
 
     def test_search_tolerates_payload_free_events(self, store: RecordStore):
         """Policy decisions carry no payload; search must not raise on them."""
         add(store, EventKind.POLICY_DECISION)
         add(store, EventKind.USER_TURN, payload=b"the auth decision")
-        hits = RecallProjection(store).search("auth", scope=RecallScope.ARCHIVE)
+        hits = recall(store).search("auth", actor="user", scope=RecallScope.ARCHIVE)
         assert len(hits) == 1
 
     def test_recent_requires_a_bound(self, store: RecordStore):
@@ -69,26 +81,69 @@ class TestRecall:
         scope with none of the narrowing."""
         add(store, EventKind.USER_TURN, payload=b"auth decision")
         with pytest.raises(ValueError, match="requires since_event"):
-            RecallProjection(store).search("auth", scope=RecallScope.RECENT)
+            recall(store).search("auth", actor="user", scope=RecallScope.RECENT)
 
     def test_recent_excludes_events_before_the_bound(self, store: RecordStore):
         add(store, EventKind.USER_TURN, payload=b"old auth decision")
         mark = add(store, EventKind.SESSION_START)
         add(store, EventKind.USER_TURN, payload=b"new auth decision")
-        hits = RecallProjection(store).search(
-            "auth", scope=RecallScope.RECENT, since_event=mark.event.id
+        hits = recall(store).search(
+            "auth", actor="user", scope=RecallScope.RECENT, since_event=mark.event.id
         )
         assert len(hits) == 1
         assert hits[0].payload == b"new auth decision"
 
     def test_project_scope_requires_a_project(self, store: RecordStore):
         with pytest.raises(ValueError, match="requires a project"):
-            RecallProjection(store).search("auth", scope=RecallScope.PROJECT)
+            recall(store).search("auth", actor="user", scope=RecallScope.PROJECT)
+
+    def test_a_caller_cannot_grant_itself_archive_scope(self, store: RecordStore):
+        """The scope used to be a plain argument, so the Record's own docstring
+        -- recall is a capability, not an ambient ability -- was a comment."""
+        add(store, EventKind.USER_TURN, payload=b"auth decision")
+        narrow = ScopeGrants({"watcher": frozenset({RecallScope.PROJECT})})
+        with pytest.raises(PolicyDenied, match="scope"):
+            recall(store, narrow).search("auth", actor="watcher", scope=RecallScope.ARCHIVE)
+        assert recall(store, narrow).search(
+            "auth", actor="watcher", scope=RecallScope.PROJECT, project="jarvis"
+        )
+
+    def test_an_unknown_actor_gets_nothing(self, store: RecordStore):
+        """Unlisted means none, so adding an actor is a deliberate act."""
+        add(store, EventKind.USER_TURN, payload=b"auth decision")
+        for scope in (RecallScope.PROJECT, RecallScope.RECENT, RecallScope.ARCHIVE):
+            with pytest.raises(PolicyDenied):
+                recall(store, ScopeGrants({})).search(
+                    "auth", actor="stranger", scope=scope, project="jarvis",
+                    since_event="0",
+                )
+
+    def test_a_grant_is_not_a_ranking(self, store: RecordStore):
+        """PROJECT and RECENT narrow along different axes, so holding one must
+        not imply the other -- that implication is how ARCHIVE leaks out of
+        something that looked narrower."""
+        add(store, EventKind.USER_TURN, payload=b"auth decision")
+        recent_only = ScopeGrants({"w": frozenset({RecallScope.RECENT})})
+        with pytest.raises(PolicyDenied):
+            recall(store, recent_only).search(
+                "auth", actor="w", scope=RecallScope.PROJECT, project="jarvis"
+            )
+
+    def test_the_limit_keeps_the_newest_hits_not_the_oldest(self, store: RecordStore):
+        """Scanning forward and breaking at the limit answered "what did we
+        decide about X" with the first time it ever came up, so a superseded
+        answer outranked the current one."""
+        for i in range(5):
+            add(store, EventKind.USER_TURN, payload=f"auth decision {i}".encode())
+        hits = recall(store).search(
+            "auth", actor="user", scope=RecallScope.ARCHIVE, limit=2
+        )
+        assert [h.payload for h in hits] == [b"auth decision 3", b"auth decision 4"]
 
     def test_forgotten_content_is_not_searchable(self, store: RecordStore):
         add(store, EventKind.USER_TURN, subjects=["person:guest"], payload=b"a private thing")
         store.forget_subject("person:guest")
-        assert RecallProjection(store).search("private", scope=RecallScope.ARCHIVE) == []
+        assert recall(store).search("private", actor="user", scope=RecallScope.ARCHIVE) == []
 
 
 class TestReconstruct:

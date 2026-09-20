@@ -14,10 +14,12 @@ paths over the same facts, which is how they diverge.
 """
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Iterator, Sequence
+from typing import Iterator, Mapping, Protocol, Sequence
 
+from ..errors import PolicyDenied
 from .events import Event, EventKind
 from .store import RecordStore
 
@@ -114,17 +116,54 @@ class RecallHit:
     *that* something happened is not secret, its content is."""
 
 
-class RecallProjection:
-    """Scoped query over the Record."""
+class RecallAuthority(Protocol):
+    """Decides whether ``actor`` may recall at ``scope``.
 
-    def __init__(self, store: RecordStore) -> None:
+    A protocol, not an import of the Policy Engine, so ``record/`` stays free
+    of ``policy/`` and the Record remains usable on its own. The router passes
+    the real one in.
+    """
+
+    def permits(self, actor: str, scope: RecallScope) -> bool: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ScopeGrants:
+    """Which scopes each actor may use. An actor not listed gets none.
+
+    Deliberately a *set* per actor rather than a maximum scope: PROJECT and
+    RECENT narrow along different axes -- one by subject, one by time -- so
+    ranking them would mean inventing an order that is not true, and an
+    invented order is how ARCHIVE ends up implied by something narrower.
+    """
+
+    grants: Mapping[str, frozenset[RecallScope]]
+
+    def permits(self, actor: str, scope: RecallScope) -> bool:
+        return scope in self.grants.get(actor, frozenset())
+
+
+class RecallProjection:
+    """Scoped query over the Record.
+
+    The scope is *requested* by the caller and *granted* by the authority.
+    It used to be a plain argument, which made the class docstring's claim --
+    recall is a capability with an autonomy class, not an ambient ability --
+    into a comment: any holder of a store could ask for ARCHIVE and get the
+    whole archive. On the system's highest-value exfiltration target that is
+    the one place the claim has to be executable.
+    """
+
+    def __init__(self, store: RecordStore, authority: RecallAuthority) -> None:
         self._store = store
+        self._authority = authority
 
     def search(
         self,
         needle: str,
         *,
         scope: RecallScope,
+        actor: str,
         project: str | None = None,
         since_event: str | None = None,
         limit: int = 20,
@@ -132,6 +171,10 @@ class RecallProjection:
         if scope is RecallScope.NONE:
             # A quarantined agent may already be under someone else's control.
             return []
+        if not self._authority.permits(actor, scope):
+            raise PolicyDenied(
+                "record.recall", f"{actor!r} may not recall at scope {scope}"
+            )
         if scope is RecallScope.RECENT and since_event is None:
             raise ValueError(
                 "RecallScope.RECENT requires since_event; without a bound it "
@@ -140,7 +183,12 @@ class RecallProjection:
         if scope is RecallScope.PROJECT and project is None:
             raise ValueError("RecallScope.PROJECT requires a project")
         needle_bytes = needle.lower().encode()
-        hits: list[RecallHit] = []
+        # Most recent wins. Breaking out at the first ``limit`` matches
+        # returned the *oldest* hits, since the log scans forward -- so
+        # "what did we decide about X" answered with the first time it ever
+        # came up, and superseded answers outranked the current one. A bounded
+        # deque keeps the cost of the full scan but not its memory.
+        hits: deque[RecallHit] = deque(maxlen=limit)
         for stored in self._store.scan():
             event = stored.event
             if not self._in_scope(event, scope, project, since_event):
@@ -148,9 +196,7 @@ class RecallProjection:
             payload = self._store.payload_or_none(event)
             if payload is not None and needle_bytes in payload.lower():
                 hits.append(RecallHit(event=event, payload=payload))
-                if len(hits) >= limit:
-                    break
-        return hits
+        return list(hits)
 
     @staticmethod
     def _in_scope(
