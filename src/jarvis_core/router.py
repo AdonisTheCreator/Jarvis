@@ -102,9 +102,11 @@ class Invocation:
     backend_id: str | None
     event_id: str
     effect_landed: bool | None = None
-    """Whether the side effect happened: True, False, or None when there is
-    nothing to know -- either an unclear outcome, or a read with no effect at
-    all.
+    """Whether a side effect happened: True, False, or None when not knowable.
+
+    ``False`` means safe to retry, and covers both a task that provably failed
+    and a read, which never had an effect to land. ``None`` means genuinely
+    unknown and needs a human.
 
     Deliberately separate from :attr:`claim`. The claim says who owns the
     ledger row; this says whether retrying is safe, and the two genuinely come
@@ -131,12 +133,13 @@ class Invocation:
 def _effect_landed(state: TaskState | None, *, side_effecting: bool) -> bool | None:
     """Did the side effect happen? True, False, or None for not knowable.
 
-    ``None`` for a read, because there is no effect to have landed. Reporting
-    True there would make a caller refuse to retry an always-safe read, and
+    ``False`` for a read: it has no side effect, so none landed, and reads are
+    always safe to retry. ``None`` is reserved for genuinely *not knowable* --
+    reporting a read that way would escalate every failed read to a human, and
     would put two facts back into one field.
     """
     if not side_effecting:
-        return None
+        return False
     if state is TaskState.SUCCEEDED:
         return True
     if state is not None and state.guarantees_no_effect:

@@ -620,10 +620,13 @@ class TestClaimLifecycle:
             ("ci.rerun_job", TaskState.INTERRUPTED, None),
             ("ci.rerun_job", TaskState.PENDING, None),
             ("ci.rerun_job", None, None),
-            # A read has no effect to have landed. Reporting True would make a
-            # caller refuse to retry something always safe to retry.
-            ("ci.read_status", TaskState.SUCCEEDED, None),
-            ("ci.read_status", TaskState.FAILED, None),
+            # A read has no side effect, so none landed -- False, meaning
+            # safe to retry. None is reserved for genuinely not knowable, and
+            # using it here would escalate every failed read to a human.
+            ("ci.read_status", TaskState.SUCCEEDED, False),
+            ("ci.read_status", TaskState.FAILED, False),
+            ("ci.read_status", TaskState.CANCELLED, False),
+            ("ci.read_status", None, False),
         ],
     )
     def test_effect_landed_is_independent_of_the_claim_outcome(
@@ -644,6 +647,10 @@ class TestClaimLifecycle:
         params = {"job_id": "j"} if capability == "ci.rerun_job" else {}
         result = router.invoke(Request(capability, "j", params))
         assert result.effect_landed is expected
+        # The documented contract: False means retry is safe, None needs a human.
+        if result.effect_landed is False:
+            assert result.claim in {ClaimOutcome.RELEASED, ClaimOutcome.NOT_APPLICABLE,
+                                    ClaimOutcome.ALREADY_RESOLVED}
 
     def test_already_resolved_from_a_failure_is_safe_to_retry(
         self, registry, engine, store
