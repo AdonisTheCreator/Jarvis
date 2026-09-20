@@ -301,3 +301,142 @@ class TestProtocolLookup:
         """Fail closed on a name that was never declared -- the arm a typo in
         a spoken Protocol name takes."""
         assert protocols.covers("no-such-protocol", "door.unlock", target="garage") is False
+
+
+class TestCanonicalisationIsOrderFree:
+    """`sort_keys=True` in two json.dumps calls. CPython preserves insertion
+    order, so a test that builds both dicts the same way passes either way --
+    and the property is exactly that it must not matter."""
+
+    def test_an_idempotency_key_ignores_parameter_order(self):
+        """Keys hash the *action*. A retry that rebuilt its params dict in a
+        different order would hash differently and send the message twice."""
+        from jarvis_core.idempotency import derive_key
+
+        fields = ("to", "body")
+        first = derive_key("message.send", "sms", {"to": "+1", "body": "hi"}, fields)
+        second = derive_key("message.send", "sms", {"body": "hi", "to": "+1"}, fields)
+        assert first == second
+
+    def test_an_approval_fingerprint_ignores_parameter_order(self):
+        """The fingerprint is what binds an approval to the parameters a human
+        saw. Order-sensitive, it would reject the very call it authorized."""
+        from jarvis_core.policy.approval import params_fingerprint
+
+        assert params_fingerprint({"door": "front", "minutes": 5}) == \
+            params_fingerprint({"minutes": 5, "door": "front"})
+
+
+class TestEntropyRedaction:
+    """The heuristic's *positive* case: without it, a novel credential format
+    the patterns do not know goes into the archive in the clear."""
+
+    def test_a_long_high_entropy_token_is_removed(self):
+        from jarvis_core.record.redact import redact
+
+        secret = "Zx9Qw2Lm4Pv7Rt1Ys6Bn3Kd8Hg5Jf0Ac"     # 32 chars, no known prefix
+        report = redact(f"export CUSTOM_CREDENTIAL={secret}")
+        assert "high-entropy" in report.labels and secret not in report.text
+
+    def test_a_low_entropy_string_of_the_same_length_survives(self):
+        from jarvis_core.record.redact import redact
+
+        assert redact("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").labels == ()
+
+    def test_the_scan_can_be_turned_off(self):
+        from jarvis_core.record.redact import redact
+
+        secret = "Zx9Qw2Lm4Pv7Rt1Ys6Bn3Kd8Hg5Jf0Ac"
+        assert redact(secret, entropy_scan=False).labels == ()
+
+    def test_text_payloads_report_that_they_were_scanned(self):
+        from jarvis_core.record.redact import redact_bytes
+
+        _, report = redact_bytes(b"nothing secret here")
+        assert report.scanned is True
+
+    def test_binary_payloads_are_pattern_scanned_not_entropy_scanned(self):
+        """A lossy decode of a compressed file is high-entropy gibberish. If
+        the binary path entropy-scanned, every screenshot with a long base64
+        run inside it would be refused as a credential."""
+        from jarvis_core.record.redact import redact_bytes
+
+        blob = b"\xff\xd8\xff\xe0" + b"Zx9Qw2Lm4Pv7Rt1Ys6Bn3Kd8Hg5Jf0Ac" + b"\x89\x00\xfe"
+        payload, report = redact_bytes(blob)
+        assert payload == blob and report.labels == () and report.scanned is False
+
+
+class TestMemoryReads:
+    def _memory(self):
+        memory = CanonicalMemory()
+        prov = Provenance(source_events=("e1",), subject_keys=("project:jarvis",))
+        first = memory.write(MemoryClass.USER_FACTS, "coffee", "black", prov)
+        second = memory.write(MemoryClass.USER_FACTS, "coffee", "oat", prov)
+        other = memory.write(MemoryClass.PROJECT, "coffee", "unrelated", prov)
+        return memory, first, second, other
+
+    def test_history_is_scoped_to_one_class_and_one_key(self):
+        """Same key under a different class is a different fact, and mixing
+        them makes the correction history of one look like the other's."""
+        memory, first, second, other = self._memory()
+        assert [f.id for f in memory.history(MemoryClass.USER_FACTS, "coffee")] == \
+            [first.id, second.id]
+        assert other.id not in {f.id for f in memory.history(MemoryClass.USER_FACTS, "coffee")}
+
+    def test_superseded_facts_are_hidden_by_default_and_available_on_request(self):
+        memory, first, second, other = self._memory()
+        assert first.id not in {f.id for f in memory.all_facts()}
+        assert first.id in {f.id for f in memory.all_facts(active_only=False)}
+
+
+class TestRecallBound:
+    def test_the_since_event_itself_is_excluded(self, store: RecordStore):
+        """Exclusive, matching ConsolidateProjection.pending, so an id shared
+        between them does not double-count the anchor."""
+        from jarvis_core.record.projections import RecallScope, ScopeGrants
+        from jarvis_core.record.projections import RecallProjection
+
+        mark = store.append(evt(), b"auth at the mark")
+        after = store.append(evt(), b"auth after it")
+        hits = RecallProjection(
+            store, ScopeGrants({"user": frozenset(RecallScope)})
+        ).search("auth", actor="user", scope=RecallScope.RECENT, since_event=mark.event.id)
+        assert [h.event.id for h in hits] == [after.event.id]
+
+
+class TestPayloadSubject:
+    def test_a_payload_about_someone_else_is_sealed_under_their_key(self, store):
+        """An event in the project's stream whose *content* is about a person:
+        forgetting the person must take the payload, not the event."""
+        stored = store.append(
+            evt(subject_keys=["project:jarvis", "person:guest"]),
+            b"what the guest said",
+            payload_subject="person:guest",
+        )
+        assert stored.event.meta["payload_subject"] == "person:guest"
+        assert store.payload(stored.event) == b"what the guest said"
+        store.forget_subject("person:guest")
+        assert store.payload_or_none(stored.event) is None
+        assert store.verify() == 1          # the event itself survives
+
+    def test_the_default_subject_is_not_annotated(self, store: RecordStore):
+        """Only a divergence is worth recording; annotating every event with
+        what the first subject key already says is noise in the archive."""
+        stored = store.append(evt(subject_keys=["project:jarvis"]), b"ordinary")
+        assert "payload_subject" not in stored.event.meta
+
+
+class TestOverrideRace:
+    def test_a_claim_released_between_the_peek_and_the_release_reports_false(self, router):
+        """Two operators overriding the same stranded claim: only one release
+        actually happens, and the loser must not record an override it did not
+        perform."""
+        key = "contended-key"
+        claim = router._idempotency.claim(key)
+        assert router._idempotency.release(claim.token) is True   # the winner
+
+        peeked = router._idempotency.peek(key)
+        assert peeked is None
+        assert router.force_release(
+            key, operator="user:harrison", session="s1", subject_keys=["project:jarvis"],
+        ) is False

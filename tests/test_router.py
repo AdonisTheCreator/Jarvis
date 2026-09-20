@@ -468,6 +468,10 @@ class TestClaimLifecycle:
         error = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])][0]
         assert error.meta["effect_uncertain"] is False
         assert error.meta["dispatch_failed"] is True
+        # The other half of the same fact: nothing reached the backend, so
+        # there was no status to fail to read. Both flags are asserted on both
+        # paths or neither flag means anything.
+        assert error.meta["status_unreadable"] is False
         # No claim existed, so nothing is held.
         assert [s.event for s in store.scan(kinds=[EventKind.CLAIM_HELD])] == []
 
@@ -486,6 +490,7 @@ class TestClaimLifecycle:
         error = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])][0]
         assert error.meta["dispatch_failed"] is False
         assert error.meta["status_unreadable"] is True
+        assert error.meta["effect_uncertain"] is True
 
     def test_an_unattributed_override_is_not_recorded_as_a_person(
         self, registry, engine, store

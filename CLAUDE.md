@@ -88,7 +88,7 @@ src/jarvis_core/
 ## Commands
 
 ```bash
-python3 -m pytest -q          # 381 tests, ~1.4s
+python3 -m pytest -q          # 394 tests, ~1.4s
 python3 -m pytest tests/test_invariants.py    # the vendor-freedom check
 python3 tools/mutation_sweep.py               # break each guard; see if a test notices
 ```
