@@ -179,6 +179,15 @@ class Event:
     meta: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if isinstance(self.subject_keys, str):
+            # A bare string is iterable, so it would become a per-character
+            # subject tuple and the event would land under garbage subjects
+            # with no error -- and, being a subject, could never be forgotten
+            # by the name the caller meant.
+            raise TypeError(
+                f"event {self.id}: subject_keys must be a sequence of strings, "
+                f"not the string {self.subject_keys!r}"
+            )
         if not self.subject_keys:
             # Not a style rule: an event with no subject can never be forgotten.
             raise ValueError(
@@ -270,7 +279,18 @@ def make_event(
     meta: Mapping[str, Any] | None = None,
     when_ms: int | None = None,
 ) -> Event:
-    """Build an event with a fresh id. ``when_ms`` is injectable for tests."""
+    """Build an event with a fresh id. ``when_ms`` is injectable for tests.
+
+    Guards the bare-string trap here as well as in ``Event.__post_init__``:
+    ``tuple("project:jarvis")`` splits into characters, so by the time the
+    constructor ran the mistake would already look like a valid tuple.
+    """
+    if isinstance(subject_keys, str):
+        raise TypeError(
+            f"subject_keys must be a sequence of strings, not the string {subject_keys!r}"
+        )
+    if isinstance(parent, str):
+        raise TypeError(f"parent must be a sequence of ids, not the string {parent!r}")
     return Event(
         id=new_ulid(when_ms),
         kind=kind,

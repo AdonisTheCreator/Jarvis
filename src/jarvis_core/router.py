@@ -377,10 +377,15 @@ class CapabilityRouter:
         wrongly released claim sends the message twice, while a claim left held
         merely needs a human.
         """
-        if not subject_keys:
-            # Validated before the ledger is touched. make_event would reject
-            # it afterwards, leaving a settled claim that no path can close.
-            raise ValueError("subject_keys must not be empty")
+        if isinstance(subject_keys, str) or not subject_keys:
+            # Validated before the ledger is touched: rejecting afterwards
+            # would leave a settled claim that no path can close. A bare string
+            # is the trap here -- it is iterable, so it would silently become a
+            # per-character subject tuple.
+            raise ValueError(
+                "subject_keys must be a non-empty sequence of strings, "
+                f"not {subject_keys!r}"
+            )
 
         if outcome is ClaimOutcome.COMPLETED:
             applied = self._idempotency.complete(token, result_ref)

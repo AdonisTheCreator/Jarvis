@@ -60,6 +60,25 @@ class TestEventSchema:
         with pytest.raises(ValueError, match="subject_keys"):
             make_event(EventKind.USER_TURN, actor=Actor.USER, session="s", subject_keys=[])
 
+    def test_a_bare_string_subject_is_rejected(self):
+        """A string is iterable, so it would silently become a per-character
+        subject tuple -- and could then never be forgotten by the name the
+        caller meant."""
+        with pytest.raises(TypeError, match="not the string"):
+            make_event(EventKind.USER_TURN, actor=Actor.USER, session="s",
+                       subject_keys="project:jarvis")
+        # The constructor guards it too, for callers that bypass make_event.
+        with pytest.raises(TypeError, match="not the string"):
+            Event(id=new_ulid(), kind=EventKind.USER_TURN, actor=Actor.USER,
+                  session="s", subject_keys="project:jarvis")
+
+    def test_a_bare_string_parent_is_rejected(self):
+        """Same trap: a parent id split into characters would silently produce
+        a DAG of nonexistent ancestors."""
+        with pytest.raises(TypeError, match="not the string"):
+            make_event(EventKind.USER_TURN, actor=Actor.USER, session="s",
+                       subject_keys=["x"], parent="01ABCDEF")
+
     def test_event_cannot_be_its_own_parent(self):
         eid = new_ulid()
         with pytest.raises(ValueError, match="itself as a parent"):

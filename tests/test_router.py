@@ -620,8 +620,10 @@ class TestClaimLifecycle:
         router = CapabilityRouter(registry, engine, store)
         router.register_backend(Pending("queue", ["ci.rerun_job"]))
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        with pytest.raises(ValueError, match="subject_keys"):
-            router.resolve(result.claim_token, ClaimOutcome.COMPLETED, subject_keys=())
+        for bad in ((), "project:jarvis"):
+            with pytest.raises(ValueError, match="subject_keys"):
+                router.resolve(result.claim_token, ClaimOutcome.COMPLETED,
+                               subject_keys=bad)
         # Still held, and still resolvable.
         assert router.outstanding_claims() == [result.idempotency_key]
         assert router.resolve(result.claim_token, ClaimOutcome.COMPLETED) is True

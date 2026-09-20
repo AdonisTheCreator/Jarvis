@@ -120,7 +120,7 @@ adapter.
 
 ## The code
 
-Phase 0 is built and tested: `src/jarvis_core/`, 288 tests, stdlib-only except
+Phase 0 is built and tested: `src/jarvis_core/`, 290 tests, stdlib-only except
 `cryptography`. The invariant that no core module may import a vendor type is
 **asserted by the test suite**, not merely documented.
 
