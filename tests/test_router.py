@@ -369,40 +369,71 @@ class TestClaimLifecycle:
         override = [s.event for s in store.scan(kinds=[EventKind.CLAIM_OVERRIDE])][0]
         assert override.actor is Actor.WATCHER
 
+    # The full truth table from router.py, pinned so the three facts cannot
+    # drift back into one another. (capability, state) -> (kind, uncertain).
     @pytest.mark.parametrize(
-        "state,expect_error,expect_uncertain",
+        "capability,state,expect_error,expect_uncertain",
         [
-            (TaskState.SUCCEEDED, False, False),   # dispatched fine, effect landed
-            (TaskState.FAILED, True, False),       # went wrong, effect known absent
-            (TaskState.CANCELLED, True, True),     # went wrong, effect unknown
-            (TaskState.INTERRUPTED, True, True),
-            (TaskState.PENDING, False, True),      # healthy in flight, effect undetermined
-            (TaskState.RUNNING, False, True),
-            (None, True, True),                    # status() raised
+            # Side-effecting: a claim exists, so certainty is meaningful.
+            ("ci.rerun_job", TaskState.SUCCEEDED, False, False),
+            ("ci.rerun_job", TaskState.FAILED, True, False),
+            ("ci.rerun_job", TaskState.CANCELLED, True, True),
+            ("ci.rerun_job", TaskState.INTERRUPTED, True, True),
+            ("ci.rerun_job", TaskState.PENDING, True, True),
+            ("ci.rerun_job", TaskState.RUNNING, True, True),
+            ("ci.rerun_job", TaskState.AWAITING_APPROVAL, True, True),
+            ("ci.rerun_job", None, True, True),
+            # Read-only: no claim, so nothing can be uncertain about an effect.
+            ("ci.read_status", TaskState.SUCCEEDED, False, False),
+            ("ci.read_status", TaskState.PENDING, False, False),
+            ("ci.read_status", TaskState.RUNNING, False, False),
+            ("ci.read_status", TaskState.FAILED, True, False),
+            ("ci.read_status", None, True, False),
         ],
     )
-    def test_dispatch_outcome_and_effect_certainty_are_separate(
-        self, registry, engine, store, state, expect_error, expect_uncertain
+    def test_the_event_truth_table(
+        self, registry, engine, store, capability, state, expect_error, expect_uncertain
     ):
-        """Conflating 'how did the dispatch go' with 'did the effect land' is
-        what produced wrong events: healthy running work is not a failure, and
-        a failure is not uncertain."""
+        """Three facts, computed separately: did the dispatch go cleanly, is a
+        side effect's fate unknown, and must the trail show it."""
+        from jarvis_core.record.projections import AuditProjection
+
         class Reporting(FakeBackend):
             def status(self, handle):
                 if state is None:
                     raise RuntimeError("status endpoint down")
                 return TaskStatus(handle=handle, state=state)
 
-        fresh = RecordStore(store.root / f"d-{state.value if state else 'none'}",
-                            store._keystore)
+        label = f"{capability}-{state.value if state else 'none'}"
+        fresh = RecordStore(store.root / label, store._keystore)
         router = CapabilityRouter(registry, engine, fresh)
-        router.register_backend(Reporting("r", ["ci.rerun_job"]))
-        router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        router.register_backend(Reporting("r", [capability]))
+        params = {"job_id": "j"} if capability == "ci.rerun_job" else {}
+        router.invoke(Request(capability, "j", params))
 
         kind = EventKind.TOOL_ERROR if expect_error else EventKind.TOOL_RESULT
         events = [s.event for s in fresh.scan(kinds=[kind])]
-        assert len(events) == 1, f"{state} should be a {kind.value}"
+        assert len(events) == 1, f"{label} should be a {kind.value}"
         assert events[0].meta["effect_uncertain"] is expect_uncertain
+
+        # Anything needing attention must be reachable from the audit trail.
+        in_trail = EventKind.TOOL_ERROR in [e.kind for e in AuditProjection(fresh).trail()]
+        assert in_trail is expect_error, f"{label} audit visibility"
+
+    def test_an_unattributed_override_is_not_recorded_as_a_person(
+        self, registry, engine, store
+    ):
+        class Exploding(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                raise RuntimeError("boom")
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Exploding("flaky", ["ci.rerun_job"]))
+        with pytest.raises(RuntimeError):
+            router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        router.force_release(router.outstanding_claims()[0])  # no operator given
+        override = [s.event for s in store.scan(kinds=[EventKind.CLAIM_OVERRIDE])][0]
+        assert override.actor is Actor.SYSTEM
 
     def test_a_failed_read_still_reaches_the_audit_trail(self, registry, engine, store):
         """Read-only work has no claim, but a failed read must not vanish."""

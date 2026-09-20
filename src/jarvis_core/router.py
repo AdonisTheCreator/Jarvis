@@ -269,26 +269,43 @@ class CapabilityRouter:
 
         state = self._state_of(backend, handle)
         outcome = self._resolve_at_dispatch(token, state, handle)
-        # Two independent facts, and conflating them is what kept producing
-        # wrong events:
+        # Three independent facts. Deriving any of them from another is what
+        # kept producing wrong events, so they are computed separately and the
+        # full truth table is pinned by test.
         #
-        #   how did the DISPATCH go?      -> TOOL_RESULT or TOOL_ERROR
-        #   did the SIDE EFFECT land?     -> effect_uncertain
+        #   went_wrong       the dispatch itself did not go cleanly
+        #   uncertain        we cannot say whether a side effect landed
+        #                    (only meaningful when there IS one, i.e. a claim)
+        #   needs_attention  the trail must show it: a failure, an unreadable
+        #                    status, or a held claim that blocks every retry
+        #                    until someone resolves it
         #
-        # A task that is running healthily dispatched fine (a result) while its
-        # effect is not yet determined (uncertain). A task that FAILED went
-        # wrong (an error) but its effect is known -- it did not happen.
+        # state      | claim? | went_wrong | uncertain | kind
+        # -----------|--------|------------|-----------|-----------
+        # SUCCEEDED  | yes/no | no         | no        | TOOL_RESULT
+        # FAILED     | yes/no | yes        | no (*)    | TOOL_ERROR
+        # CANCELLED  | yes    | yes        | yes       | TOOL_ERROR
+        # INTERRUPTED| yes    | yes        | yes       | TOOL_ERROR
+        # PENDING    | yes    | no         | yes       | TOOL_ERROR
+        # PENDING    | no     | no         | no        | TOOL_RESULT
+        # None       | yes/no | yes        | claim-only| TOOL_ERROR
+        #
+        # (*) FAILED is the one terminal state that promises the effect did not
+        #     happen, so it went wrong but is not uncertain.
         went_wrong = state is None or state in {
             TaskState.FAILED, TaskState.CANCELLED, TaskState.INTERRUPTED
         }
-        uncertain = state is None or (
-            state is not TaskState.SUCCEEDED and not state.guarantees_no_effect
-        )
+        uncertain = outcome is ClaimOutcome.HELD
+        needs_attention = went_wrong or uncertain
         self._record.append(
             make_event(
                 # A backend that reports failure immediately must not be
                 # recorded as a result, or the trail cannot tell it from success.
-                EventKind.TOOL_ERROR if went_wrong else EventKind.TOOL_RESULT,
+                # TOOL_ERROR here means "the audit trail must show this",
+                # not "it crashed": a held claim blocks every retry of the
+                # action until someone resolves it, and TOOL_RESULT is not an
+                # audit kind.
+                EventKind.TOOL_ERROR if needs_attention else EventKind.TOOL_RESULT,
                 actor=Actor.SYSTEM,
                 session=request.session,
                 subject_keys=task.subject_keys or ("system",),
@@ -300,6 +317,7 @@ class CapabilityRouter:
                     "state": state.value if state else "unknown",
                     "claim": outcome.value,
                     "effect_uncertain": uncertain,
+                    "dispatch_failed": went_wrong,
                 },
             )
         )
@@ -339,7 +357,7 @@ class CapabilityRouter:
         self,
         key: str,
         *,
-        operator: str = "user",  # same prefixed form as Request.actor
+        operator: str = "system",  # same prefixed form as Request.actor
         reason: str = "",
         session: str = "operator",
         caused_by: str | None = None,
