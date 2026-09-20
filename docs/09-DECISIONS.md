@@ -250,3 +250,98 @@ by what it wants to own, never by how it's marketed.
 **Why it's already answered.** The API has existed for a while — Grok 4.6, 500K context,
 roughly $2/M in and $6/M out. The interesting finding wasn't availability, it was that the
 model is the *least* differentiated of the three things.
+
+---
+
+## D9 — **Adopt Jev as the decision layer; retention becomes adjudicated**
+**Date:** 2026-09-20 · **Status:** Decided · **Detail:** [`14-THE-DECISION-LAYER.md`](14-THE-DECISION-LAYER.md)
+
+**Decision.** Adopt Jev (TypeSafe's System One model) as the implementation of a `decide.*`
+capability family covering twelve bounded-choice decision points already specified across
+docs 02, 05 and 11 — salience, modality routing, interruptibility, capability routing,
+trigger triage, ingest triage, event categorisation, recall planning, promotion/demotion,
+skill-draft triage, consolidation triage, and retention adjudication.
+
+**And: retention is no longer a fixed policy.** Everything is held at full fidelity for 30
+days, then each item is judged individually — `keep_full` / `keep_decision_frames` /
+`compress` / `derive_and_drop` / `delete`. Deferring the judgment to day 30 is the whole
+point: by then we know whether anything referenced it, whether its run succeeded, and whether
+a human ever looked at it. A fixed policy has to guess all of that in advance.
+
+**Why.** These decisions were all specified without a mechanism — too cheap for a frontier
+call, too consequential to hard-code, too frequent for a human. Jev returns typed answers
+with calibrated probabilities in 70–500 ms at **$0.042/M input, output free**. The whole
+decision layer runs for **under $50/year**; the same work through a frontier model would be
+~$1,600 and would add hundreds of milliseconds to paths that must be invisible.
+
+That changes the design, not just the budget: decisions we would have skipped because they
+weren't worth a model call are now free.
+
+**A finding worth keeping.** On WebMCP, Jev scored 49/49 with structured tools and 25/49
+without. A clean, well-named action space roughly doubles decision accuracy — an independent
+validation of the capability registry, which now pays for itself twice.
+
+**What it commits us to.**
+- **The hard boundary: Jev decides, the Policy Engine authorizes.** A calibrated probability
+  is not an approval. Jev may choose *which* backend, *which* modality, *whether* to surface,
+  *what* to retain. It may never grant an approval token, authorize an A3 action, override a
+  policy decision, or judge a Protocol's preconditions met. R7a applies identically to a
+  decision model — more so, because it returns a number.
+- **Low confidence escalates to the more conservative option, never the cheaper one.** For
+  retention that means *keep*.
+- **Every decision point ships with a real deterministic fallback**, not a stub. Jev is five
+  days old, early-access, waitlist-gated, single-vendor, synthetic-trained, and essentially
+  every published figure is self-reported. Fail *open* for speed (routing, modality,
+  retention → safe default); fail *closed* for safety (policy, quarantine, approval →
+  unavailable means deny).
+- **Single bounded decisions only, never chains** (vendor reports weak multi-step reasoning),
+  and never where free text is required (it structurally cannot).
+- **We verify calibration ourselves.** Log `(decision_type, options, chosen, probability,
+  outcome)`; monthly reliability diagram, Brier score and ECE per decision type; thresholds
+  set from *our* measured curve, not the vendor's. A poorly calibrated decision type is
+  demoted to a deterministic rule or escalated — per type, not globally. D5 already built the
+  instrumentation, so this costs nothing extra.
+
+**What reverses it.** Measured calibration failure on our own decision types, or the early
+access programme not supporting a daily driver. Both are survivable because of the fallback
+rule — which is the point of the fallback rule.
+
+---
+
+## D10 — **Critics must be cross-provider, and blocked runs are failures**
+**Date:** 2026-09-20 · **Status:** Decided
+
+**Decision.** The Worker–Critic loop (Phase 4) adopts two rules from Claudex Loop:
+**whoever built it never grades it, and the grader comes from a different provider**; and
+**blocked runs or exhausted round budgets surface as failures, never as approval.** Plus a
+deliberate hard round cap.
+
+**Why.** R12 said the monitor must be independent of the actor as a *process* property. This
+sharpens it to a *vendor* property: a reviewer that shares the builder's failure modes is not
+a reviewer. Claudex Loop's first greenfield run logged 55 findings across 5 rounds converging
+26 → 15 → 12 → 2 → 0, including one fatal architecture flaw — that convergence curve is the
+argument.
+
+**The Jev gate on top** is the same shape as our promotion ladder: four bounded decisions
+(loop depth / reviewer persona / finding triage / stop signal) gating an expensive cycle,
+with low confidence escalating to the more thorough path.
+
+**Note for elsewhere:** Super Coder's generation council and AI quality judge are currently a
+same-provider review loop. That's a real finding for that repo, not this one.
+
+---
+
+## D11 — **Archify: adopt the principle, the tool is a 20-minute experiment**
+**Date:** 2026-09-20 · **Status:** Decided
+
+**Decision.** Two of Archify's properties become rules for anything Jarvis generates about a
+codebase: **fail-closed validation** (an invented component fails validation with diagnostics
+rather than rendering a confident wrong diagram) and **evidence-linked claims** (every node
+points at the file and line range proving it exists). The tool itself is optional — a
+maintained `ARCHITECTURE.md` per repo gets most of the benefit free.
+
+**Why.** This is doc 11's provenance discipline applied to generated artefacts: a claim
+carries its evidence or it doesn't ship. The rule is worth more than the renderer.
+
+**Note:** two unrelated projects share the name — `tt-a1i/archify` (MIT agent skill) and
+`Aryan1718/Archify` (npx CLI). Check which a reference means.

@@ -82,8 +82,23 @@ when a real question needs it, and treat the voice API as a stopgap rather than 
 | OpenClaw / Hermes | 5 | Bake-off, doc 10 |
 | Personal Jarvis | 5 if adopted whole, 2 as a voice node | Audit first (D2) |
 | VisionClaw | 2 | Sensor node pattern; reference implementation |
+| **Jev** (TypeSafe) | 1 | A provider serving a capability class nothing else serves — bounded typed decisions. Adopted (D9). Never owns policy, memory or the ledger |
+| **Claudex Loop** | 3 | Cross-provider critic pattern. Adopt the independence and fail-closed rules for Phase 4 (D10) |
+| **Archify** | 2 / principle | Fail-closed validation + evidence-linked claims adopted as a rule; the tool is a 20-minute experiment (D11) |
 
 ---
+
+## A note on class 1: "just a model" can still be a new component class
+
+Jev is instructive. It classifies as class 1 — a provider, an afternoon to add, nothing
+breaks if it goes — and yet it filled twelve holes across the architecture that had no good
+occupant. Class 1 is cheap, but cheap is not the same as unimportant.
+
+The distinction that matters is **cost to remove**, not impact when present. A thing can be
+transformative *and* class 1, and those are the best possible additions: high leverage, no
+lock-in. Look for them deliberately.
+
+The mirror image is the trap already named: a thing can be marginal *and* class 5.
 
 ## The standing question for anything new
 

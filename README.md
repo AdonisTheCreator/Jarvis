@@ -32,6 +32,7 @@ purpose: the contracts come before the integrations.
 | [11 — The Record](docs/11-THE-RECORD.md) | Deep memory as one execution ledger: capture, retention, forgetting, the subconscious |
 | [12 — The Core Machine](docs/12-JARVIS-CORE-HARDWARE.md) | What the dedicated box is for, sized against the workload |
 | [13 — Integration Triage](docs/13-INTEGRATION-TRIAGE.md) | How to explore constantly without the stack sprawling |
+| [14 — The Decision Layer](docs/14-THE-DECISION-LAYER.md) | Jev, adjudicated retention, cross-provider critics |
 
 Start with **04** if you want the argument, **01** if you want the vision, **02** if you
 want the part nobody has built yet, **09** if you want current state.
@@ -104,6 +105,8 @@ adapter.
 8. **The monitor is independent of the actor.** The kill switch cannot be reached by the agents it governs. ([05](docs/05-ARCHITECTURE.md) §5.4)
 9. **Forgetting works by destroying keys, not by rewriting history.** Per-subject encryption from the first write. ([11](docs/11-THE-RECORD.md) §6)
 10. **The subconscious has no network egress, and recall is a scoped capability.** The archive is the highest-value target in the system. ([11](docs/11-THE-RECORD.md) §8)
+11. **Jev decides; the Policy Engine authorizes.** A calibrated probability is never an approval. ([14](docs/14-THE-DECISION-LAYER.md) §5)
+12. **Low confidence escalates to the more thorough path, never the cheaper one.** ([14](docs/14-THE-DECISION-LAYER.md) §3)
 
 ---
 
@@ -119,12 +122,20 @@ adapter.
 | **D6** The subconscious | **Retrieval and consolidation on idle time, not a fine-tune.** A fine-tune cannot honour `forget()`. No network egress, ever; recall is a scoped capability. |
 | **D7** How to evaluate anything new | **Triage by the layer it wants to own.** Models and skills are free — explore constantly. Control planes and memory-owners are not. |
 | **D8** Grok | **Add as a provider now.** The differentiated asset is realtime X search as a capability, not the model — and not the $3/hr voice API. |
+| **D9** The decision layer | **Adopt Jev.** Twelve bounded-choice decision points across the architecture had no mechanism. Typed answers with calibrated probabilities in 70–500 ms for under $50/year. Retention becomes per-item adjudication at 30 days. |
+| **D10** Critics | **Cross-provider, fail-closed, hard round cap.** A reviewer sharing the builder's failure modes is not a reviewer. |
+| **D11** Generated architecture claims | **Fail-closed validation and evidence-linked claims.** A claim carries its evidence or it doesn't ship. |
 
 Two of these shape the code more than the rest. **D4**: deferring the control-plane choice
 *and* prioritising the learning loop together mean neither memory nor procedural learning can
 be rented — "no vendor types in the core" stops being aspirational. **D5**: the event schema,
 causal DAG and per-subject encryption have to exist before the first event is written, because
 none of the three can be retrofitted onto an archive.
+
+**D9** is the newest and it changes what's affordable: a decision model at $0.042/M input
+makes per-item judgment free, so "pick a retention policy" becomes "decide per item, forever."
+The hard boundary holds — **Jev decides, the Policy Engine authorizes**; a calibrated
+probability is not an approval.
 
 **Next up:** Phase 0 (core contracts, the Record, and the safety spine), then Phase 0.5 (the
 Personal Jarvis audit and the control-plane bake-off, in parallel).

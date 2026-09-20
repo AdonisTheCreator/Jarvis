@@ -138,6 +138,29 @@ years fits comfortably on a 2 TB NVMe with room to spare.
 The permanent tier is small — it's the *conclusions*, not the working. It's also the tier
 that must survive a total loss of everything else, so it gets its own backup cadence.
 
+### 5.1 Adjudicated retention (D9)
+
+> **Revised.** The Hot→Warm boundary is not a blanket downgrade. Everything is held at full
+> fidelity for 30 days, and then **each item is judged individually** — keep full, keep
+> decision frames, compress, derive-and-drop, or delete. Full design in
+> [`14-THE-DECISION-LAYER.md`](14-THE-DECISION-LAYER.md) §3.
+
+Deferring the judgment to day 30 is the point: by then we know whether anything ever
+referenced the item, whether the run it belongs to succeeded, and whether a human ever looked
+at it. A fixed policy has to guess all of that in advance.
+
+Five rules keep it safe: **low confidence escalates to the more conservative option** (here,
+*keep*); adjudication only **marks**, with a 30-day grace period before the reaper runs; every
+verdict is a logged event with its probability, so the thresholds are tunable against
+evidence; a **tombstone survives deletion**; and **third parties in frame bias toward
+deletion**, not retention (charter commitment 4 — the one signal where conservative means
+delete). `forget()` is unaffected and always wins.
+
+The same pass generalises beyond pixels: audio (keep vs. transcript-only), full-file read
+blobs, verbose tool output, superseded index shards. Retention stops being a constant and
+becomes a per-item judgment — which is affordable only because the decision layer costs
+fractions of a cent per thousand items.
+
 ---
 
 ## 6. The forgetting problem — and it is a real one
