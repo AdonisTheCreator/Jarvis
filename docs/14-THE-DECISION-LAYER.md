@@ -248,7 +248,72 @@ two unrelated projects called Archify (`tt-a1i/archify`, MIT agent skill; and
 
 ---
 
-## 10. Triage placement (doc 13)
+## 10. When to use Jev, and when to just write the rule
+
+The self-check — *"maybe I'm overemphasizing Jev where rules would work; it seems like just a
+really powerful if-then"* — is correct, and worth turning into a standing rule, because the
+failure mode it anticipates is real: reaching for a probabilistic model to answer a question
+that code already answers exactly.
+
+**The distinction isn't power, it's what each one consumes.**
+
+> A **deterministic rule** maps *already-structured* state to a bounded choice.
+> **Jev** maps *unstructured or high-dimensional* state to a bounded choice.
+
+A rule requires you to have solved the hard part first — turning the situation into numbers
+and flags you can branch on. `if severity > 3 and not acked` works because `severity` already
+exists. Jev's actual job is taking "here is the situation, messily" and producing an
+enumerable answer. If the input is already clean enough to write the rule, **write the rule**.
+
+### Two tests, in order
+
+1. **Is the question decidable?** If code can answer it exactly, code should.
+2. **Is the input already structured?** If yes, a rule is free, deterministic, auditable and
+   testable. Jev costs money and returns a probability.
+
+Only when both answers are no does Jev earn the call.
+
+### The Archify case — rules, and the intuition to doubt was right
+
+"Does component X exist at `file.ts:120–145`?" is **decidable**. Parse the AST, resolve the
+symbol, compare the range. Running that through Jev would be strictly worse: a probabilistic
+answer to a question with an exact one, at a cost, with a failure mode (confidently wrong)
+that the parser does not have.
+
+**Fail-closed validation is a parser, not a judgment.** Same for evidence links.
+
+Where Jev *would* earn a place in that same feature: *"which 12 of these 87 components matter
+enough to show?"*, *"is this Architecture Delta significant enough to flag in review?"*,
+*"does this diagram explain the thing the reader is actually confused about?"* Those are
+judgments — no parser settles them, and a hand-tuned heuristic would need constant retuning.
+
+### The thing rules genuinely cannot do
+
+**A rule doesn't know when it's near the line.** `if severity > 3` treats 3.01 and 100
+identically and fires with total confidence at both. Jev returns a calibrated probability, so
+"I'm not sure" becomes an *actionable output* — which is the entire basis of the escalation
+rule in §3 and the promotion ladder in doc 02.
+
+So the sharper version:
+
+> **Jev's advantage over a rule is not accuracy. It's knowing when it doesn't know.**
+> Use it where an uncertainty signal changes what happens next. Where nothing escalates,
+> a rule is probably better.
+
+A second-order point: rules don't drift, but the *world* does. A threshold tuned on last
+year's traffic degrades silently. A decision model over the same drifting input degrades more
+gracefully and announces it through falling confidence. That argues for rules on stable
+structured decisions, and Jev on decisions over inputs that move.
+
+**Net:** of the twelve decision points in §2, all twelve pass both tests — they take messy
+state and they all have an escalation path. That isn't a coincidence; it's why they had no
+mechanism before. But the thirteenth idea that comes along should be run through the two
+tests before it gets a Jev call, and most validation, schema, permission and existence checks
+will fail them — correctly.
+
+---
+
+## 11. Triage placement (doc 13)
 
 | Thing | Class | Placement |
 |---|---|---|

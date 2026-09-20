@@ -33,6 +33,8 @@ purpose: the contracts come before the integrations.
 | [12 — The Core Machine](docs/12-JARVIS-CORE-HARDWARE.md) | What the dedicated box is for, sized against the workload |
 | [13 — Integration Triage](docs/13-INTEGRATION-TRIAGE.md) | How to explore constantly without the stack sprawling |
 | [14 — The Decision Layer](docs/14-THE-DECISION-LAYER.md) | Jev, adjudicated retention, cross-provider critics |
+| [15 — Session Control](docs/15-SESSION-CONTROL.md) | Phone→desktop dispatch, the coding command centre, voice bridging |
+| [16 — Model Topology](docs/16-MODEL-TOPOLOGY.md) | Why there is no "main Jarvis model" |
 
 Start with **04** if you want the argument, **01** if you want the vision, **02** if you
 want the part nobody has built yet, **09** if you want current state.
@@ -107,6 +109,8 @@ adapter.
 10. **The subconscious has no network egress, and recall is a scoped capability.** The archive is the highest-value target in the system. ([11](docs/11-THE-RECORD.md) §8)
 11. **Jev decides; the Policy Engine authorizes.** A calibrated probability is never an approval. ([14](docs/14-THE-DECISION-LAYER.md) §5)
 12. **Low confidence escalates to the more thorough path, never the cheaper one.** ([14](docs/14-THE-DECISION-LAYER.md) §3)
+13. **Write the rule when the input is structured and the question is decidable.** Jev is for judgments over messy state — its edge is knowing when it doesn't know. ([14](docs/14-THE-DECISION-LAYER.md) §10)
+14. **Remote awareness before remote control.** A blocked session you hear about beats a session you can drive. ([15](docs/15-SESSION-CONTROL.md) §1)
 
 ---
 
@@ -125,6 +129,11 @@ adapter.
 | **D9** The decision layer | **Adopt Jev.** Twelve bounded-choice decision points across the architecture had no mechanism. Typed answers with calibrated probabilities in 70–500 ms for under $50/year. Retention becomes per-item adjudication at 30 days. |
 | **D10** Critics | **Cross-provider, fail-closed, hard round cap.** A reviewer sharing the builder's failure modes is not a reviewer. |
 | **D11** Generated architecture claims | **Fail-closed validation and evidence-linked claims.** A claim carries its evidence or it doesn't ship. |
+| **D12** Control plane | **Hermes.** Resolves D1. The bake-off is re-purposed from selection to validation; Class A and D stay gates. |
+| **D13** Session control | **One `session.*` family, three adapter tiers.** Remote awareness before remote control. The harnesses already emit the Record; the Agent SDK's approval callback is where policy plugs in. |
+| **D14** Model topology | **No main model.** Five roles — voice front, decision layer, subconscious, reasoning, specialists. Identity lives in the core, not in a vendor. |
+| **D15** Grok Bot | **A worker for authenticated web tasks, later — not a competitor.** It cannot have your Record, your policy, your devices, or the ability to forget. |
+| **D16** God's Eye View | **Adopt as a visual output surface, not a data source.** Use a real weather API for weather. Situational awareness about places, never people. |
 
 Two of these shape the code more than the rest. **D4**: deferring the control-plane choice
 *and* prioritising the learning loop together mean neither memory nor procedural learning can
@@ -132,7 +141,12 @@ be rented — "no vendor types in the core" stops being aspirational. **D5**: th
 causal DAG and per-subject encryption have to exist before the first event is written, because
 none of the three can be retrofitted onto an archive.
 
-**D9** is the newest and it changes what's affordable: a decision model at $0.042/M input
+**D12** settles the control plane: **Hermes**. One consequence worth holding onto — D4 already
+puts memory and the learning loop in our core, and those are Hermes' headline features. So
+Hermes is adopted for its control plane (sessions, channels, seven execution backends, cron),
+with its learning loop as a continuous benchmark against ours rather than the system of record.
+
+**D9** changed what's affordable: a decision model at $0.042/M input
 makes per-item judgment free, so "pick a retention policy" becomes "decide per item, forever."
 The hard boundary holds — **Jev decides, the Policy Engine authorizes**; a calibrated
 probability is not an approval.

@@ -4,6 +4,14 @@
 any control plane is running in anger. Two candidates, one adapter interface, a fixed task
 set, and a scoring rubric written **before** the results come in.*
 
+> **Status update (D12, 2026-09-20): Hermes chosen.** This bake-off is **not cancelled — it is
+> re-purposed from selection to validation.** Class A (control-plane fundamentals) and Class D
+> (safety) remain **gates**: a failure there reopens the decision. Class C (learning and memory)
+> becomes a **standing benchmark** rather than a one-time test — Hermes' native extraction
+> measured continuously against our core's, on identical traces, so that "adopt the technique"
+> and "hand over ownership" stay distinguishable. Class B and the §4 weights no longer select a
+> winner; keep them as a scorecard.*
+
 ---
 
 ## 1. The actual question

@@ -85,8 +85,27 @@ when a real question needs it, and treat the voice API as a stopgap rather than 
 | **Jev** (TypeSafe) | 1 | A provider serving a capability class nothing else serves — bounded typed decisions. Adopted (D9). Never owns policy, memory or the ledger |
 | **Claudex Loop** | 3 | Cross-provider critic pattern. Adopt the independence and fail-closed rules for Phase 4 (D10) |
 | **Archify** | 2 / principle | Fail-closed validation + evidence-linked claims adopted as a rule; the tool is a 20-minute experiment (D11) |
+| **Grok Bot** (xAI) | **4** — a runtime with its own deployment | Persistent agents on *their* cloud computers, driving UIs. Useful, bounded, later (D15) |
+| **God's Eye View** | 2 — output surface | MIT, self-hostable spatial-awareness globe. A *node*, not a data source. Not for weather (D16) |
+| **Traycer** | 4 | Multi-agent worktree topology behind an adapter; don't rebuild it (doc 15 §6) |
+| Weather (NOAA/NWS or equivalent) | 2 | The correct answer for "will it rain" — an afternoon of work |
 
 ---
+
+## Worked example: Grok Bot is not class 1, and the name is why
+
+Grok the *model* is class 1 (D8). **Grok Bot is a different product** and lands in class 4:
+persistent, named agents each running on their own cloud computer, signing into applications
+and driving their interfaces directly rather than through APIs, continuing after your laptop
+closes, bundled into consumer seats at around $120/month.
+
+That is a runtime **and** a deployment **and** its own persistence. It wants to own sessions,
+execution and state. The shared brand name is exactly the trap this document exists to catch:
+*classify by what it wants to own, not by what it's called.*
+
+The follow-on question — *"is Jarvis practically just a larger Grok Bot?"* — is answered in
+D15, and it's the most useful question in this document because it names what Jarvis has to be
+good at to be worth building.
 
 ## A note on class 1: "just a model" can still be a new component class
 

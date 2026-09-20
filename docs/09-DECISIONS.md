@@ -345,3 +345,175 @@ carries its evidence or it doesn't ship. The rule is worth more than the rendere
 
 **Note:** two unrelated projects share the name — `tt-a1i/archify` (MIT agent skill) and
 `Aryan1718/Archify` (npx CLI). Check which a reference means.
+
+---
+
+## D12 — **Control plane: Hermes** (resolves D1)
+**Date:** 2026-09-20 · **Status:** Decided · **Supersedes:** D1's deferral
+
+**Decision.** Hermes Agent is the control plane. The bake-off (doc 10) is not cancelled — it
+is **re-purposed from selection to validation**, and its Class C tasks become an ongoing
+signal rather than a one-time test.
+
+**Why it's defensible.** The stated priority from the start was that learning loops and memory
+quality matter most, and that is Hermes' axis. Hermes also brings things that are real
+regardless of which way the memory question lands: **seven terminal backends** including
+serverless-hibernating ones (Modal, Daytona) that cost almost nothing between sessions —
+directly useful for cheap always-on watchers and sandboxed execution — 20+ channels including
+email, cron with cross-platform delivery, subagent spawning, and MCP.
+
+**The consequence to hold honestly.** D4 puts memory and the procedural learning loop in our
+core. Those are also Hermes' headline differentiators. So the thing Hermes was picked *for* is
+largely the thing we're building ourselves either way — which means in practice **Hermes is
+being adopted as a control plane (sessions, channels, execution backends, cron), and its
+learning loop and memory become a reference implementation and a second opinion, not the
+system of record.**
+
+That is a coherent position; it just isn't the one the headline suggests. Two things follow:
+
+1. **D4 becomes more important, not less.** Hermes will want to own memory. It must not. One
+   owner per class (Rule 2), and that owner is the core.
+2. **Running Hermes alongside our own extraction is now a continuous benchmark.** Doc 10's
+   Class C stops being a gate and becomes a standing comparison — if their loop beats ours on
+   the same traces, that's a signal to adopt techniques, not to hand over ownership.
+
+**Costs accepted.**
+- The OpenClaw → Hermes migration path is one-way. Starting here **forecloses that exit.**
+  Accepted deliberately.
+- Hermes' node/device story is weaker than OpenClaw's, so **more of the node protocol is ours
+  to build** (L0/L1, doc 05). That work moves into our court; budget for it.
+
+**What reverses it.** A bake-off validation failure on Class A (control-plane fundamentals) or
+Class D (safety), either of which is a gate rather than a weighted axis.
+
+---
+
+## D13 — **Session control is one capability family, not an integration per tool**
+**Date:** 2026-09-20 · **Status:** Decided · **Detail:** [`15-SESSION-CONTROL.md`](15-SESSION-CONTROL.md)
+
+**Decision.** Phone→desktop dispatch, status reporting, steering and voice bridging are a
+single `session.*` capability family (`list`/`status`/`create`/`send`/`stream`/`interrupt`/
+`attach_voice`/`kill`) with **three adapter tiers**: native SDK, headless CLI + session files,
+and tmux as the universal fallback.
+
+**Two findings that shaped it.**
+- **The harnesses already emit the Record.** Codex writes every session to `~/.codex/sessions/`
+  as JSONL — prompts, responses, tool calls, tool results, timestamped. Claude Code emits
+  `stream-json`. We ingest and normalise; we do not instrument.
+- **The Claude Agent SDK exposes a programmatic approval callback.** That is where the Policy
+  Engine plugs in *inside* the harness, so a phone-dispatched session inherits our autonomy
+  classes and approval tokens rather than the harness's defaults. The seam already exists.
+
+**Build order inverts the intuition.** Remote *awareness* before remote *control*: blocked,
+failed and finished sessions as registered watches (A0 reads, L1 delivery) are the daily win,
+and they need no steering at all. `"Codex has been on an approval prompt for 22 minutes"` is
+R4 trigger 1, answered with one word.
+
+**Two limits stated up front.** Live steering of a running Codex *thread* is not first-class
+yet (open feature request for `turn/steer` against an existing `thread_id`); until it lands,
+Codex steering goes through tmux and is brittle. And voice is for steering and status, not
+authoring — dictating code is slower than letting the agent write it.
+
+**Security.** `session.send`'s autonomy class follows the *target*, not the verb: A2 into a
+sandboxed worktree, **A3 into a session holding shell and credentials on the primary account**
+— and A3 means a Protocol. Private network overlay only, never an exposed port. Strong auth on
+the phone node. The kill switch reaches every tracked session. And **session output is
+untrusted content** — a session that read a hostile file and can be steered from a phone closes
+the injection loop.
+
+---
+
+## D14 — **There is no "main Jarvis model"**
+**Date:** 2026-09-20 · **Status:** Decided · **Detail:** [`16-MODEL-TOPOLOGY.md`](16-MODEL-TOPOLOGY.md)
+
+**Decision.** Adopt the proposed shape — fast local front + Jev + routing — but reject the
+premise that any of them is "the main model." Identity lives in the core (the `identity`
+memory class, the policy engine, the Record), not in a model. Five roles: **voice front**
+(small-fast local, resident), **decision layer** (Jev), **subconscious** (mid local, resident),
+**reasoning** (frontier, routed), **specialists** (harness adapters).
+
+**Why the premise matters.** Naming a main model couples the identity to a vendor, so a model
+deprecation becomes an identity change. That is precisely the lock-in the core exists to
+prevent — and it would be a strange place to accept it after refusing it everywhere else.
+
+**On "fast large leading local":** those words pull against each other. At 24 GB you get ~32B
+at Q4; *leading* is not local in 2026 without tier-D hardware. It doesn't need to be, because
+the ack path and the reasoning path are different paths — the local model does conversation
+and speed, the frontier model does the thinking, and the user hears one voice. A bigger local
+model earns its cost only for reasoning over the Record itself (which must not leave the
+machine) and offline resilience.
+
+**Adds `route.pin`** as a real capability: *"use Opus for this"*, *"keep this local"*, *"don't
+send that to the cloud."* The second is a spoken privacy control and must be honoured
+absolutely — a pinned-local task that silently burst to cloud would breach charter commitment
+7. Verified at the network layer.
+
+**New tests** (doc 07): persona consistency across backends, route transparency, `route.pin`
+enforcement, ack specificity.
+
+---
+
+## D15 — **Grok Bot: a worker for one bounded job, later — not a competitor**
+**Date:** 2026-09-20 · **Status:** Decided
+
+**Triage correction.** Grok the *model* is class 1 (D8). **Grok Bot is class 4** — persistent
+named agents on xAI's cloud computers, signing into apps and driving their interfaces rather
+than using APIs, continuing after the laptop closes, ~$120/seat/month. A runtime *and* a
+deployment *and* its own persistence.
+
+**Is Jarvis just a larger Grok Bot?** No — and the question is worth answering precisely,
+because it names what Jarvis must be good at to deserve building. The overlap is "an agent does
+multi-step work for you," which is the commodity part. What Grok Bot **structurally cannot
+have** is: your own Record, your own policy engine over irreversible actions, your own device
+nodes, proactivity on your own registered thresholds, Protocols, and the ability to forget.
+*If those aren't materially better than a subscription's defaults, we built the wrong thing.*
+
+**Where it genuinely wins**, and this should be conceded plainly: authenticated web tasks on
+services with no API. It has a persistent cloud computer with logged-in sessions; our
+equivalent is computer-use, which is local and brittle. That's a real capability —
+`web.authenticated_task` — that nothing else in our stack serves well.
+
+**Adopt only if a recurring need appears, and then bounded:**
+- **Dedicated scoped accounts only.** Never primary credentials, never anything that can move
+  money or change access control. It signs in *as you*, on someone else's machine.
+- **It bypasses APIs by driving UIs**, so there is no structured audit — our Record gets only
+  what the adapter can observe. That is a genuine hole in the ledger and must be stated, not
+  papered over.
+- Its own memory and persistence make it a class-6 risk if we ever depend on state it holds.
+- The coverage note that it "reaches employees through subscriptions, not a security review"
+  is the governance problem in one line. It applies to us too.
+
+**Not Phase 0–2.**
+
+---
+
+## D16 — **God's Eye View: adopt as an output surface; not for weather**
+**Date:** 2026-09-20 · **Status:** Decided
+
+**Decision.** Adopt `bilawalsidhu/gods-eye-view` (MIT, open-sourced 2026-08-24) as a **visual
+output surface / node**, not as a data source. Use a dedicated weather API (NOAA/NWS or
+equivalent) for weather reporting.
+
+**Why not for weather.** Its environmental layers are FIRMS fires, USGS earthquakes and an
+opt-in cockpit cloud effect; actual weather radar and satellite imagery are an **open issue,
+not a shipped feature**. "Will it rain" is a structured question with an authoritative free
+answer one API call away. Routing it through a 3D globe would be slower, less accurate and less
+reliable.
+
+**Why adopt it anyway.** It is a photorealistic globe fusing live aircraft, ships, satellites,
+earthquakes, fires, traffic, infrastructure and public cameras — and **it already has a
+realtime voice agent driving the camera through 28 tools.** That is architecturally the node
+pattern from doc 05 §2, already built: a surface the output router can target. It fills the
+modality tier we are shortest on (doc 02 §5 wants peripheral/visual surfaces and we currently
+have none).
+
+*"Show me the fires near the cabin"* routes to the globe. *"Is it going to rain"* routes to the
+weather API and comes back as one spoken sentence. **Different capabilities, different
+surfaces — which is the whole point of output routing.**
+
+**The boundary to hold.** It fuses OSINT including public cameras and live aircraft and ship
+tracking. That is surveillance-adjacent, and charter commitment 4 applies: **use it for
+situational awareness about places and conditions, never about people.** No tracking
+individuals, no following named vessels or aircraft, no building a picture of where someone is.
+MIT licensing means we can self-host and enforce that by removing capabilities, not just by
+policy.
