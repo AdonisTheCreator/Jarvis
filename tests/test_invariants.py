@@ -26,7 +26,7 @@ STDLIB_OK = {
     "abc", "dataclasses", "enum", "typing", "json", "os", "time", "hashlib",
     "hmac", "threading", "math", "re", "pathlib", "__future__", "collections",
     "itertools", "functools", "contextlib", "secrets", "base64", "uuid",
-    "logging", "types", "datetime",
+    "logging", "types", "datetime", "stat",
 }
 
 

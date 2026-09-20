@@ -334,15 +334,22 @@ class TestKillSwitch:
                 Request("ci.read_status", "r", actor=other)
             ).outcome is Outcome.DENY
 
-    def test_unreadable_sentinel_fails_closed(self, registry, approvals, protocols, tmp_path):
-        """An unreadable kill switch is indistinguishable from a tampered one."""
+    def test_an_unreadable_sentinel_fails_closed(
+        self, registry, approvals, protocols, tmp_path
+    ):
+        """An unreadable kill switch is indistinguishable from a tampered one.
 
-        sentinel = tmp_path / "HALT"
-        switch = FileKillSwitch(sentinel)
-        # Simulate a disk/permission fault on the sentinel path itself.
-        object.__setattr__(switch, "_sentinel", _ExplodingPath(sentinel))
+        The fault is real rather than simulated: a parent that is a file, not
+        a directory, which is what a detached mount looks like from here. A
+        mocked exception would have passed against the old implementation too,
+        where ``Path.exists()`` swallowed this errno and answered "absent".
+        """
+        blocker = tmp_path / "mount"
+        blocker.write_bytes(b"not a directory")
+        switch = FileKillSwitch(blocker / "HALT")     # ENOTDIR on stat
         engine = PolicyEngine(registry, approvals, protocols, switch)
         assert switch.is_engaged() is True
+        assert "failing closed" in (switch.reason() or "")
 
         # Everything actionable stops...
         decision = engine.evaluate(Request("ci.rerun_job", "job-1"))
@@ -353,9 +360,24 @@ class TestKillSwitch:
             Request("ci.read_status", "r", actor="user")
         ).outcome is Outcome.ALLOW
 
+    def test_a_sentinel_whose_directory_vanished_fails_closed(self, tmp_path):
+        """The failure mode a presence-encoded switch invites: the file is
+        absent because the *volume* is gone, and absence reads as "carry on".
+        Absent from a directory we can still see is the only honest not-engaged.
+        """
+        holder = tmp_path / "mount"
+        holder.mkdir()
+        switch = FileKillSwitch(holder / "HALT")
+        assert switch.is_engaged() is False
+        assert switch.reason() is None
 
-class _ExplodingPath(type(Path())):
-    """A Path whose existence check raises, to exercise the fail-closed branch."""
+        holder.rmdir()                                 # the mount goes away
+        assert switch.is_engaged() is True
+        assert "unreachable" in (switch.reason() or "")
 
-    def exists(self, *a, **kw) -> bool:  # type: ignore[override]
-        raise OSError("simulated I/O failure")
+    def test_an_engaged_sentinel_still_reports_its_reason(self, tmp_path):
+        sentinel = tmp_path / "HALT"
+        sentinel.write_text("manual halt")
+        assert FileKillSwitch(sentinel).reason() == "manual halt"
+        sentinel.write_text("   ")
+        assert FileKillSwitch(sentinel).reason() == "engaged"

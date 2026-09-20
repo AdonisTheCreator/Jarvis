@@ -60,6 +60,15 @@ src/jarvis_core/
 - **Jev decides; the Policy Engine authorizes.** A calibrated probability is
   never an approval.
 - **Runtimes propose memory; the core writes it.**
+- **A guard must be able to fail.** Three separate bugs here were guards that
+  could not: a generation check that was inert, a `leaks()` diagnostic that
+  could not detect the broken fan-out it existed to detect, and a kill switch
+  whose fail-closed branch was unreachable because `Path.exists()` swallows
+  the errno. Mutation-test every guard — break the thing it protects and watch
+  it go red — or it is decoration.
+- **A class the core does not own may be indexed, never copied.** `procedural`
+  lives in SKILL.md files and `operational` in the control plane; a canonical
+  copy here is a second owner, which is the drift docs/04 Rule 2 forbids.
 - **The claim token carries its generation.** Keys hash the *action*, so every
   retry shares its predecessor's key; without the generation a late resolution
   settles a newer attempt. Anything unclear holds the claim — guessing sends
@@ -68,7 +77,7 @@ src/jarvis_core/
 ## Commands
 
 ```bash
-python3 -m pytest -q          # 326 tests, ~1.1s
+python3 -m pytest -q          # 336 tests, ~1.2s
 python3 -m pytest tests/test_invariants.py    # the vendor-freedom check
 ```
 

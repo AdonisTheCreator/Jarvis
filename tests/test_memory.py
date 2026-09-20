@@ -2,7 +2,7 @@
 import pytest
 
 from jarvis_core.memory import (
-    CanonicalMemory, MemoryClass, Proposal, Provenance,
+    CORE_OWNED, CanonicalMemory, MemoryClass, Proposal, Provenance,
 )
 
 
@@ -77,6 +77,40 @@ class TestProposals:
         memory = CanonicalMemory()
         with pytest.raises(ValueError, match="humans only"):
             memory.propose(Proposal(MemoryClass.IDENTITY, "persona", "…", prov()))
+
+
+class TestOwnership:
+    """docs/05 §4: procedural lives in SKILL.md files, operational in the
+    control plane. A canonical copy here is a second source of truth, which is
+    the drift Rule 2 exists to prevent."""
+
+    def test_a_class_owned_elsewhere_cannot_be_written_as_canonical(self):
+        memory = CanonicalMemory()
+        for owned_elsewhere in set(MemoryClass) - CORE_OWNED:
+            with pytest.raises(ValueError, match="owned outside the core"):
+                memory.write(owned_elsewhere, "k", "v", prov())
+
+    def test_it_can_be_indexed_and_says_so(self):
+        memory = CanonicalMemory()
+        fact = memory.write(
+            MemoryClass.PROCEDURAL, "deploy", "skills/deploy.md", prov(), index=True
+        )
+        assert fact.indexed is True
+
+    def test_a_core_owned_class_is_not_an_index(self):
+        """Otherwise 'indexed' stops meaning anything and a reader can no
+        longer tell a pointer from the truth."""
+        memory = CanonicalMemory()
+        assert memory.write(MemoryClass.USER_FACTS, "coffee", "black", prov()).indexed is False
+        with pytest.raises(ValueError, match="core-owned"):
+            memory.write(MemoryClass.USER_FACTS, "coffee", "black", prov(), index=True)
+
+    def test_accepting_a_proposal_for_a_borrowed_class_indexes_it(self):
+        """The SKILL.md draft path: agents draft procedural memory, so accept
+        must not be the hole that writes it as canonical."""
+        memory = CanonicalMemory()
+        memory.propose(Proposal(MemoryClass.PROCEDURAL, "deploy", "skills/deploy.md", prov()))
+        assert memory.accept(0).indexed is True
 
 
 class TestForgetFanOut:

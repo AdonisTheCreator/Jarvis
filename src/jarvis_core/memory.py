@@ -25,7 +25,7 @@ from .ids import new_ulid
 
 
 class MemoryClass(StrEnum):
-    """One owner per class (docs/04 Rule 2)."""
+    """One owner per class (docs/05 §4, which is Rule 2 of docs/04)."""
 
     IDENTITY = "identity"
     """Persona, tone, values, user-set boundaries. Written by humans only."""
@@ -82,6 +82,12 @@ class Fact:
     value: Any
     provenance: Provenance
     superseded_by: str | None = None
+    indexed: bool = False
+    """A pointer to something owned elsewhere, not a fact the core owns.
+
+    Kept on the fact rather than inferred, so a reader that has one in hand
+    cannot mistake a cached pointer for canonical truth.
+    """
 
     @property
     def active(self) -> bool:
@@ -138,7 +144,8 @@ class CanonicalMemory:
         with self._lock:
             proposal = self._pending.pop(index)
         return self.write(
-            proposal.memory_class, proposal.key, proposal.value, proposal.provenance
+            proposal.memory_class, proposal.key, proposal.value, proposal.provenance,
+            index=proposal.memory_class not in CORE_OWNED,
         )
 
     def reject(self, index: int) -> Proposal:
@@ -151,10 +158,31 @@ class CanonicalMemory:
         key: str,
         value: Any,
         provenance: Provenance,
+        *,
+        index: bool = False,
     ) -> Fact:
-        """Write a fact. Supersedes any active fact with the same class+key."""
+        """Write a fact. Supersedes any active fact with the same class+key.
+
+        Classes outside :data:`CORE_OWNED` are owned elsewhere -- ``SKILL.md``
+        files for procedural, the control plane for operational (docs/05 §4).
+        The core may hold a *pointer* to those, never a second copy of the
+        truth, so writing one takes an explicit ``index=True``. Two owners for
+        one class is precisely the drift Rule 2 exists to prevent, and a rule
+        nothing enforces is a comment.
+        """
+        owned = memory_class in CORE_OWNED
+        if not owned and not index:
+            raise ValueError(
+                f"{memory_class} is owned outside the core (docs/05 §4); pass "
+                "index=True to store a pointer to it rather than a rival copy"
+            )
+        if owned and index:
+            raise ValueError(
+                f"{memory_class} is core-owned; there is nothing to index it against"
+            )
         fact = Fact(
-            id=new_ulid(), memory_class=memory_class, key=key, value=value, provenance=provenance
+            id=new_ulid(), memory_class=memory_class, key=key, value=value,
+            provenance=provenance, indexed=not owned,
         )
         with self._lock:
             for existing_id, existing in list(self._facts.items()):
@@ -225,13 +253,23 @@ class CanonicalMemory:
         )
 
     def leaks(self, subject: str) -> list[str]:
-        """Facts that would still hold ``subject``'s content after a naive delete.
+        """Facts that still hold ``subject``'s content. Empty after a forget.
 
-        Diagnostic: if this is non-empty after a forget, the fan-out is broken.
+        Content survives an erasure two ways, and the second is the one that
+        bites: a fact that *names* the subject, and a fact derived from one
+        that has been erased -- whose summary still contains what its parent
+        said.
+
+        The second check deliberately does not reuse ``forget``'s traversal.
+        A diagnostic built from the code it is checking confirms that code's
+        bugs; this one asks a different question -- "is any surviving fact's
+        provenance dangling?" -- so it still fires if the fan-out breaks.
         """
         with self._lock:
+            live = set(self._facts)
             return sorted(
                 fact.id
                 for fact in self._facts.values()
                 if subject in fact.provenance.subject_keys
+                or any(parent not in live for parent in fact.provenance.derived_from)
             )

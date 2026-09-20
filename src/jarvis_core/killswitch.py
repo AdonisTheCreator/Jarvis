@@ -11,6 +11,8 @@ can disable its own supervision has none.
 """
 from __future__ import annotations
 
+import os
+import stat
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -34,21 +36,54 @@ class FileKillSwitch(KillSwitch):
     mount, a disk error -- we assume engaged. An unreadable kill switch is
     indistinguishable from a tampered one, and the safe reading of "I don't
     know" is "stop".
+
+    Encoding "engaged" as the *presence* of a file fights that, because every
+    way of failing to see the file looks like absence, which looks like
+    "carry on". ``Path.exists()`` makes it worse: it swallows ENOENT,
+    ENOTDIR, ELOOP and EBADF and returns False, so a sentinel whose mount has
+    gone away reads as not engaged. So we stat the sentinel ourselves, and on
+    ENOENT we also check that the directory it would live in is still there.
+    Absent from a directory we can see is the one honest "not engaged"; every
+    other outcome is "I cannot see the switch", which means stop.
     """
 
     def __init__(self, sentinel: Path | str) -> None:
         self._sentinel = Path(sentinel)
 
-    def is_engaged(self) -> bool:
+    def _state(self) -> tuple[bool, str | None]:
+        """``(engaged, reason)``. One place, so is_engaged and reason agree."""
         try:
-            return self._sentinel.exists()
+            os.stat(self._sentinel)
+        except FileNotFoundError:
+            if self._holder_visible():
+                return False, None
+            return True, "kill switch location unreachable; failing closed"
+        except OSError as exc:
+            return True, f"kill switch unreadable ({exc.strerror}); failing closed"
+        return True, None
+
+    def _holder_visible(self) -> bool:
+        """Is the directory the sentinel would live in still a directory?
+
+        A detached mount, a parent replaced by a file, a revoked permission:
+        all of them make an absent sentinel mean something other than "the
+        operator has not engaged it".
+        """
+        try:
+            return stat.S_ISDIR(os.stat(self._sentinel.parent).st_mode)
         except OSError:
-            return True  # fail closed
+            return False
+
+    def is_engaged(self) -> bool:
+        return self._state()[0]
 
     def reason(self) -> str | None:
+        engaged, why = self._state()
+        if not engaged:
+            return None
+        if why is not None:
+            return why
         try:
-            if not self._sentinel.exists():
-                return None
             return self._sentinel.read_text(encoding="utf-8").strip() or "engaged"
         except OSError:
             return "kill switch unreadable; failing closed"
