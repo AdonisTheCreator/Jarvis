@@ -33,6 +33,9 @@ AUDIT_KINDS: frozenset[EventKind] = frozenset(
         EventKind.MEMORY_FORGET,
         EventKind.SKILL_APPROVE,
         EventKind.KILLSWITCH,
+        # A capability that was invoked and then failed is audit-relevant: the
+        # trail must not show an invoke with no sign of what became of it.
+        EventKind.TOOL_ERROR,
     }
 )
 

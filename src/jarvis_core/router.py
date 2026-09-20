@@ -1,25 +1,30 @@
 """The Capability Router (docs/05 §6).
 
 Routes by **capability and policy**, never by product name, and scores rather
-than branching. Three properties of the hot path matter:
+than branching. Four properties of the path matter:
 
-* **No model call.** Scoring is a registry lookup plus arithmetic. A model call
-  here is where latency stacking begins.
-* **Policy first.** Nothing reaches a backend before the Policy Engine has
-  said yes.
-* **Exactly once.** Side-effecting capabilities claim an idempotency key before
-  execution and release it only when the effect provably did not happen.
+* **No model call on the hot path.** Scoring is a registry lookup plus
+  arithmetic. A model call here is where latency stacking begins.
+* **Policy first, and always recorded.** Nothing reaches a backend before the
+  Policy Engine has said yes -- and a *refusal* is written to the Record too. A
+  trail that only shows what happened cannot show what was attempted, which is
+  exactly what you want to see after a quarantined agent probes every
+  capability it can name.
+* **Exactly once.** Side-effecting capabilities claim an idempotency key, and
+  the claim is released only when the effect provably did not happen.
+* **The authorized action is the executed action.** The task cannot disagree
+  with the request it was authorized under.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from dataclasses import dataclass, replace
+from typing import Any, Mapping
 
-from .backend import AgentBackend, Estimate, Task, TaskHandle
+from .backend import AgentBackend, Estimate, Task, TaskHandle, TaskState
 from .capability import Capability, CapabilityRegistry
-from .errors import JarvisCoreError
+from .errors import ApprovalRequired, JarvisCoreError, PolicyDenied
 from .idempotency import IdempotencyLedger, derive_key
-from .policy.engine import Decision, PolicyEngine, Request
+from .policy.engine import Decision, Outcome, PolicyEngine, Request
 from .record import Actor, EventKind, RecordStore, make_event
 
 
@@ -33,6 +38,15 @@ class DuplicateSuppressed(JarvisCoreError):
     def __init__(self, key: str, state: str) -> None:
         self.key, self.state = key, state
         super().__init__(f"idempotency key {key[:12]}… is {state}; not repeating")
+
+
+class TaskMismatch(JarvisCoreError):
+    """A task was handed in that does not match the authorized request.
+
+    Guards the hole where an authorized read could carry a write past policy:
+    policy and the idempotency key derive from the *request*, while execution
+    would use the *task*.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +65,25 @@ class Invocation:
     backend_id: str | None
     event_id: str
     idempotency_key: str | None = None
+    settled: bool = False
+    """False when the backend returned a non-terminal state. The idempotency
+    claim stays in flight until :meth:`CapabilityRouter.settle` resolves it."""
+
+
+def _actor_of(actor: str) -> Actor:
+    """Map a request actor string onto the Record's coarse actor enum.
+
+    Getting this wrong attributes unattended background work to the human,
+    which is the one mistake an audit trail must never make.
+    """
+    head = actor.split(":", 1)[0].strip().lower()
+    return {
+        "user": Actor.USER,
+        "agent": Actor.AGENT,
+        "watcher": Actor.WATCHER,
+        "subconscious": Actor.SUBCONSCIOUS,
+        "system": Actor.SYSTEM,
+    }.get(head, Actor.SYSTEM)
 
 
 class CapabilityRouter:
@@ -77,8 +110,8 @@ class CapabilityRouter:
     def candidates(self, task: Task) -> list[Candidate]:
         """Score every healthy backend that serves the capability.
 
-        Deliberately arithmetic: capability match, health, measured confidence,
-        then latency and cost as tie-breakers.
+        Deliberately arithmetic: measured confidence first, then latency and
+        cost as tie-breakers.
         """
         out: list[Candidate] = []
         for backend in self._backends:
@@ -102,49 +135,69 @@ class CapabilityRouter:
     # -- the full path ---------------------------------------------------
 
     def invoke(self, request: Request, task: Task | None = None) -> Invocation:
-        """Authorize, claim, execute, record. In that order, always."""
+        """Authorize, choose, claim, execute, record.
+
+        Order is load-bearing. The backend is chosen *before* the idempotency
+        claim, so a routing failure cannot strand a claim and permanently
+        block the retry that would have succeeded.
+        """
+        actor = _actor_of(request.actor)
+
+        # 1. Policy decides -- including on unknown capabilities, which it fails
+        #    closed on. Looking the capability up first would turn a documented
+        #    refusal into a raw KeyError.
+        decision = self._policy.evaluate(request)
+        self._record_decision(request, decision, actor)
+
+        if decision.outcome is Outcome.DENY:
+            raise PolicyDenied(
+                request.capability,
+                decision.reason,
+                decision.autonomy.label if decision.autonomy else None,
+            )
+        if decision.outcome is Outcome.REQUIRE_APPROVAL:
+            raise ApprovalRequired(request.capability, decision.approval_request_id or "")
+
         capability = self._registry.require(request.capability)
-        decision = self._policy.authorize(request)  # raises on deny / approval needed
+        task = self._task_for(request, task)
 
-        task = task or Task(
-            capability=request.capability,
-            target=request.target,
-            params=request.params,
-            session=request.session,
-            subject_keys=("system",),
-        )
+        # 2. Choose before claiming.
+        backend = self.choose(task)
 
+        # 3. Claim. From here a failure must either complete or release.
         key = self._claim_if_side_effecting(capability, request)
 
-        backend = self.choose(task)
-        event = self._record.append(
-            make_event(
-                EventKind.CAPABILITY_INVOKE,
-                actor=Actor.AGENT if request.actor == "agent" else Actor.USER,
-                actor_id=request.actor,
-                session=request.session,
-                subject_keys=task.subject_keys or ("system",),
-                meta={
-                    "capability": request.capability,
-                    "target": request.target,
-                    "backend": backend.id,
-                    "policy": decision.reason,
-                    "idempotency_key": key,
-                    "reversible": capability.reversible,
-                },
+        try:
+            event = self._record.append(
+                make_event(
+                    EventKind.CAPABILITY_INVOKE,
+                    actor=actor,
+                    actor_id=request.actor,
+                    session=request.session,
+                    subject_keys=task.subject_keys or ("system",),
+                    meta={
+                        "capability": request.capability,
+                        "target": request.target,
+                        "backend": backend.id,
+                        "policy": decision.reason,
+                        "idempotency_key": key,
+                        "reversible": capability.reversible,
+                    },
+                )
             )
-        )
+        except Exception:
+            # Nothing has executed, so the claim is definitively free.
+            self._release(key)
+            raise
 
         try:
             handle = backend.execute(task, idempotency_key=key)
         except Exception as exc:
             # The effect may or may not have landed. Leave the claim in flight:
             # a stuck claim needs a human, a wrongly released one sends twice.
-            # Record the failure, though -- an audit trail that only shows
-            # attempts cannot distinguish "did nothing" from "half did it".
             self._record.append(
                 make_event(
-                    EventKind.ERROR,
+                    EventKind.TOOL_ERROR,
                     actor=Actor.SYSTEM,
                     session=request.session,
                     subject_keys=task.subject_keys or ("system",),
@@ -160,9 +213,7 @@ class CapabilityRouter:
             )
             raise
 
-        if key is not None:
-            self._idempotency.complete(key, handle.id)
-
+        settled = self._settle_claim(backend, handle, key)
         self._record.append(
             make_event(
                 EventKind.TOOL_RESULT,
@@ -174,6 +225,7 @@ class CapabilityRouter:
                     "capability": request.capability,
                     "backend": backend.id,
                     "handle": handle.id,
+                    "settled": settled,
                 },
             )
         )
@@ -184,6 +236,65 @@ class CapabilityRouter:
             backend_id=backend.id,
             event_id=event.event.id,
             idempotency_key=key,
+            settled=settled,
+        )
+
+    def settle(self, backend: AgentBackend, handle: TaskHandle) -> bool:
+        """Resolve an in-flight claim for an asynchronous task.
+
+        A queued effect that later fails must not stay recorded as done, or the
+        legitimate retry is suppressed and the message is never sent. Callers
+        poll this until it returns True.
+        """
+        return self._settle_claim(backend, handle, handle.idempotency_key)
+
+    # -- internals -------------------------------------------------------
+
+    def _task_for(self, request: Request, task: Task | None) -> Task:
+        """Derive the task from the request, or validate a supplied one.
+
+        Policy and the idempotency key both derive from the *request*. If the
+        task were allowed to name a different capability or target, an
+        authorized read could carry an unauthorized write to a backend.
+        """
+        if task is None:
+            return Task(
+                capability=request.capability,
+                target=request.target,
+                params=request.params,
+                session=request.session,
+                subject_keys=("system",),
+            )
+        if task.capability != request.capability or task.target != request.target:
+            raise TaskMismatch(
+                f"task {task.capability!r}->{task.target!r} does not match authorized "
+                f"request {request.capability!r}->{request.target!r}"
+            )
+        return replace(task, session=request.session)
+
+    def _record_decision(self, request: Request, decision: Decision, actor: Actor) -> None:
+        """Write every policy outcome, including refusals."""
+        kind = {
+            Outcome.ALLOW: EventKind.POLICY_DECISION,
+            Outcome.DENY: EventKind.APPROVAL_DENY,
+            Outcome.REQUIRE_APPROVAL: EventKind.APPROVAL_REQUEST,
+        }[decision.outcome]
+        self._record.append(
+            make_event(
+                kind,
+                actor=actor,
+                actor_id=request.actor,
+                session=request.session,
+                subject_keys=("system",),
+                meta={
+                    "capability": request.capability,
+                    "target": request.target,
+                    "outcome": decision.outcome.value,
+                    "reason": decision.reason,
+                    "autonomy": decision.autonomy.label if decision.autonomy else None,
+                    "quarantined": request.quarantined,
+                },
+            )
         )
 
     def _claim_if_side_effecting(
@@ -201,3 +312,26 @@ class CapabilityRouter:
         if not claim.should_execute:
             raise DuplicateSuppressed(key, claim.state.value)
         return key
+
+    def _settle_claim(
+        self, backend: AgentBackend, handle: TaskHandle, key: str | None
+    ) -> bool:
+        """Complete or release a claim based on the backend's real state."""
+        if key is None:
+            return True
+        try:
+            state = backend.status(handle).state
+        except Exception:
+            return False  # unknown: leave in flight rather than guess
+        if state is TaskState.SUCCEEDED:
+            self._idempotency.complete(key, handle.id)
+            return True
+        if state in {TaskState.FAILED, TaskState.CANCELLED}:
+            # Definitively did not take effect -- a retry is legitimate.
+            self._release(key)
+            return True
+        return False  # still running: the claim is correctly in flight
+
+    def _release(self, key: str | None) -> None:
+        if key is not None:
+            self._idempotency.release(key)

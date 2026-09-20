@@ -9,9 +9,9 @@ from jarvis_core.capability import Capability, CapabilityRegistry
 from jarvis_core.errors import ApprovalRequired, PolicyDenied
 from jarvis_core.ids import new_ulid
 from jarvis_core.policy import PolicyEngine, Request
-from jarvis_core.record import EventKind, RecordStore
+from jarvis_core.record import Actor, EventKind, RecordStore
 from jarvis_core.router import (
-    CapabilityRouter, DuplicateSuppressed, NoBackendAvailable,
+    CapabilityRouter, DuplicateSuppressed, NoBackendAvailable, TaskMismatch,
 )
 
 
@@ -121,7 +121,8 @@ class TestInvokePath:
     def test_the_record_verifies_after_a_run(self, router, store: RecordStore):
         router.invoke(Request("ci.read_status", "repo"))
         router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert store.verify() == 4  # an invoke and a result for each
+        # Three events per call now: the policy decision, the invoke, the result.
+        assert store.verify() == 6
 
     def test_outcomes_are_recorded_not_just_attempts(self, router, store: RecordStore):
         result = router.invoke(Request("ci.read_status", "repo"))
@@ -139,10 +140,10 @@ class TestInvokePath:
         with pytest.raises(RuntimeError):
             router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
 
-        errors = [s.event for s in store.scan(kinds=[EventKind.ERROR])]
+        errors = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])]
         assert len(errors) == 1
         assert errors[0].meta["effect_uncertain"] is True
-        assert store.verify() == 2
+        assert store.verify() == 3
 
     def test_a_failed_call_leaves_the_claim_in_flight(self, registry, engine, store):
         """A stuck claim needs a human; a wrongly released one sends twice."""
@@ -159,6 +160,100 @@ class TestInvokePath:
             router.invoke(request)
 
 
+class TestReviewFindings:
+    """Regression coverage for the seven findings from the Phase 0 review."""
+
+    def test_a_routing_failure_does_not_strand_the_claim(self, registry, engine, store):
+        """Claim after choose: otherwise a retry is blocked forever once the
+        backend recovers."""
+        router = CapabilityRouter(registry, engine, store)
+        request = Request("ci.rerun_job", "j", {"job_id": "j"})
+        with pytest.raises(NoBackendAvailable):
+            router.invoke(request)
+        router.register_backend(FakeBackend("late", ["ci.rerun_job"]))
+        assert router.invoke(request).handle is not None
+
+    def test_a_task_cannot_disagree_with_the_request_it_was_authorized_under(self, router):
+        """Otherwise an authorized read carries an unauthorized write."""
+        with pytest.raises(TaskMismatch):
+            router.invoke(
+                Request("ci.read_status", "repo"),
+                Task("ci.rerun_job", "prod-deploy", {"job_id": "prod-deploy"}),
+            )
+        with pytest.raises(TaskMismatch):
+            router.invoke(Request("ci.read_status", "repo"), Task("ci.read_status", "other"))
+
+    def test_a_queued_task_is_not_recorded_as_done(self, registry, engine, store):
+        """A pending effect that later fails must stay retryable."""
+        class Queueing(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.PENDING)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Queueing("queue", ["ci.rerun_job"]))
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert result.settled is False
+
+    def test_a_failed_async_task_releases_the_claim_for_a_real_retry(self, registry, engine, store):
+        class Failing(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.FAILED)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Failing("flaky", ["ci.rerun_job"]))
+        request = Request("ci.rerun_job", "j", {"job_id": "j"})
+        assert router.invoke(request).settled is True
+        assert router.invoke(request).handle is not None  # retry permitted
+
+    @pytest.mark.parametrize(
+        "actor,expected",
+        [("user", Actor.USER), ("agent", Actor.AGENT), ("watcher:ci", Actor.WATCHER),
+         ("subconscious", Actor.SUBCONSCIOUS), ("system", Actor.SYSTEM)],
+    )
+    def test_actors_are_not_all_attributed_to_the_human(self, router, store, actor, expected):
+        """Attributing unattended work to the user is the one mistake an audit
+        trail must never make."""
+        router.invoke(Request("ci.read_status", "repo", actor=actor))
+        invokes = [s.event for s in store.scan(kinds=[EventKind.CAPABILITY_INVOKE])]
+        assert invokes[-1].actor is expected
+        assert invokes[-1].actor_id == actor
+
+    def test_refusals_leave_a_trail(self, router, store: RecordStore):
+        """A quarantined agent probing every capability must be visible."""
+        for capability in ("ci.read_status", "ci.rerun_job", "message.send"):
+            with pytest.raises(PolicyDenied):
+                router.invoke(Request(capability, "t", quarantined=True))
+        denials = [s.event for s in store.scan(kinds=[EventKind.APPROVAL_DENY])]
+        assert len(denials) == 3
+        assert all(e.meta["quarantined"] is True for e in denials)
+
+    def test_an_approval_gate_is_recorded_as_a_request(self, router, store: RecordStore):
+        with pytest.raises(ApprovalRequired):
+            router.invoke(Request("message.send", "sam", {"to": "sam", "body": "hi"}))
+        requests = [s.event for s in store.scan(kinds=[EventKind.APPROVAL_REQUEST])]
+        assert len(requests) == 1 and requests[0].is_permanent
+
+    def test_unknown_capability_raises_the_documented_refusal_type(self, router):
+        """Not a raw KeyError -- callers catch PolicyDenied."""
+        with pytest.raises(PolicyDenied, match="unknown capability"):
+            router.invoke(Request("nope.invent", "t"))
+
+    def test_a_failure_is_visible_in_the_audit_trail(self, registry, engine, store):
+        """An invoke with no sign of what became of it is a broken trail."""
+        from jarvis_core.record.projections import AuditProjection
+
+        class Exploding(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                raise RuntimeError("boom")
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Exploding("flaky", ["ci.rerun_job"]))
+        with pytest.raises(RuntimeError):
+            router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        kinds = [e.kind for e in AuditProjection(store).trail()]
+        assert EventKind.TOOL_ERROR in kinds
+
+
 class TestScriptedWorkload:
     """Phase 0 exit criterion: a scripted workload routes end to end."""
 
@@ -170,7 +265,7 @@ class TestScriptedWorkload:
             router.invoke(Request("ci.read_status", f"repo-{i}"))
             router.invoke(Request("ci.rerun_job", f"job-{i}", {"job_id": f"job-{i}"}))
 
-        assert store.verify() == 100  # invoke + result per task
+        assert store.verify() == 150  # decision + invoke + result per task
         events = [s.event for s in store.scan(kinds=[EventKind.CAPABILITY_INVOKE])]
         assert len(events) == 50
         # Every action is reconstructible from the Record alone.
