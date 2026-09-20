@@ -118,6 +118,20 @@ adapter.
 
 ---
 
+## The code
+
+Phase 0 is built and tested: `src/jarvis_core/`, 214 tests, stdlib-only except
+`cryptography`. The invariant that no core module may import a vendor type is
+**asserted by the test suite**, not merely documented.
+
+```
+ids · errors · autonomy · capability · backend · idempotency · killswitch
+quarantine · memory · router · policy/ · record/ · decide/
+```
+
+Start at `CLAUDE.md` for orientation, or `docs/09-DECISIONS.md` for why anything
+is the way it is.
+
 ## Where we are
 
 | Decision | Status |

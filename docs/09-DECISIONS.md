@@ -595,3 +595,70 @@ on with per-item adjudication.
 workspace automatically to mount Jarvis' tools into a sub-agent. Workspace-scoped, additive,
 and it does not touch the global config — but it is a privilege-granting write performed as a
 silent side-effect. In our stack that needs an explicit capability with an autonomy class.
+
+---
+
+## D18 — **Phase 0 built: what shipped, and what building it revealed**
+**Date:** 2026-09-20 · **Status:** Complete · **Code:** `src/jarvis_core/`
+
+**Shipped.** The Record (append-only, content-addressed, causal DAG,
+per-subject crypto-shredding, write-time redaction, hash-chain tamper
+evidence), the Policy Engine (A0–A4, scoped single-use approvals, Protocols,
+kill switch), the decision layer (24 registered points, mandatory fallbacks,
+the rule factory, per-point calibration), canonical memory (provenance,
+proposals, transitive forget), the capability router (authorize → claim →
+execute → record), idempotency, the backend contract, and the quarantine
+boundary. **214 tests.**
+
+**Stdlib-only except `cryptography`.** The core's vendor-freedom invariant is
+now enforced by `tests/test_invariants.py`, which parses every core module and
+fails on a vendor import or a vendor-named class. An architectural rule that
+nothing checks decays silently; this one cannot.
+
+### Four bugs the build surfaced, each worth keeping
+
+1. **Redaction pattern shadowing.** `sk-ant-…` matched the OpenAI pattern
+   first, so Anthropic keys were redacted under the wrong label. Correct
+   redaction, lying audit trail. Ordering now runs most-specific first.
+
+2. **The null decider reported itself available.** Its zero-confidence answer
+   was then *re-escalated* as though a model had been unsure — quietly turning
+   "no decision layer configured" into "escalate everything". Fixed by making
+   absence explicit: `available()` is False, so each point's own fallback
+   applies.
+
+3. **`safety_critical` was set on five points whose fallback was already the
+   safe answer.** Denying there is strictly worse than falling back — refusing
+   to forget because the decision layer is down is not failing closed, it is
+   failing. Removed, and the property is now asserted: every standard point has
+   a safe fallback, and a point that cannot name one is probably a rule wearing
+   a decision's clothes.
+
+4. **Two found only because a test existed**, which is the argument for writing
+   them first:
+   - *Content-addressed blobs were shared across subjects.* One subject's
+     payload could serve another's event, so a shared blob **survived one of
+     them being forgotten**. A leak, not a saving. Blobs are now namespaced per
+     subject, and the layering corrected: the **AAD binds payload → subject**,
+     the **hash chain binds event → payload**. Binding the AAD to the event id
+     had also made dedup impossible, so the fix restores it.
+   - *ULIDs are only time-ordered across milliseconds.* Within one, the random
+     component decides order arbitrarily — and the Record relies on id order
+     being write order. A busy moment shuffles the log. Now monotonic per the
+     ULID spec, with auto-generated timestamps that never regress, so an NTP
+     correction cannot make the log appear to go backwards.
+
+### Exit criteria, against `docs/06`
+
+| Criterion | Status |
+|---|---|
+| 50 scripted tasks route end to end, zero vendor types in the core | ✅ `test_router.py::TestScriptedWorkload`, `test_invariants.py` |
+| Kill switch halts, verified from a test harness | ✅ including the fail-closed path and the human-observe carve-out |
+| Quarantined agent + adversarial content → Proposal, no capability invoked | ✅ three injection fixtures (email, PR comment, app review) |
+| Every action reconstructible from the Record alone | ✅ invoke *and* outcome recorded; audit walks the causal DAG |
+| `forget()` destroys the key, leaves hashes and links intact, fans out | ✅ including transitive derived facts |
+
+### What is deliberately not built yet
+Durable idempotency (in-memory is honest about its scope), a real Jev adapter
+(waitlist), vector/FTS indexes for Recall, and the Hermes adapter. All are
+Phase 0.5+ and none require changing a Phase 0 contract.

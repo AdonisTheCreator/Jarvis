@@ -7,8 +7,12 @@ This reorders and adds explicit exit criteria that are testable rather than narr
 
 ---
 
-## Phase 0 — Core contracts and the safety spine
+## Phase 0 — Core contracts and the safety spine ✅ **COMPLETE**
 **No devices. No voice. No integrations. Ship the boring part first.**
+
+> **Shipped 2026-09-20** in `src/jarvis_core/` — 214 tests, stdlib-only except
+> `cryptography`. See `docs/09-DECISIONS.md` D18 for what was built and the four
+> bugs the build surfaced.
 
 Build:
 - Capability descriptor schema + registry (start with 3 capabilities, all A0/A1)
