@@ -55,6 +55,11 @@ class EventKind(StrEnum):
     APPROVAL_GRANT = "approval.grant"
     APPROVAL_DENY = "approval.deny"
     POLICY_WRITE = "policy.write"  # D17: spoken routing policy
+    CLAIM_HELD = "claim.held"
+    """A side effect's fate is undetermined, so its claim is held and every
+    retry of that action is blocked until someone resolves it. Its own kind
+    rather than an overloaded ``tool.error``: a queued task is not a failure,
+    but it does need to be visible."""
     CLAIM_OVERRIDE = "claim.override"
     """An operator freed an idempotency claim by hand. The one operation in
     the system that can deliberately cause a duplicate side effect."""

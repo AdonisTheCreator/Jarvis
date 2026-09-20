@@ -34,6 +34,7 @@ AUDIT_KINDS: frozenset[EventKind] = frozenset(
         EventKind.SKILL_APPROVE,
         EventKind.KILLSWITCH,
         EventKind.CLAIM_OVERRIDE,
+        EventKind.CLAIM_HELD,
         # A capability that was invoked and then failed is audit-relevant: the
         # trail must not show an invoke with no sign of what became of it.
         EventKind.TOOL_ERROR,
