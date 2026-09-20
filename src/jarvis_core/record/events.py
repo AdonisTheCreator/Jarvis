@@ -60,6 +60,11 @@ class EventKind(StrEnum):
     retry of that action is blocked until someone resolves it. Its own kind
     rather than an overloaded ``tool.error``: a queued task is not a failure,
     but it does need to be visible."""
+    CLAIM_RESOLVED = "claim.resolved"
+    """A held claim was resolved normally. The counterpart to CLAIM_HELD: an
+    open claim is a ``claim.held`` with no matching ``claim.resolved`` or
+    ``claim.override``, which is what makes held claims enumerable by kind
+    without showing settled actions as stranded."""
     CLAIM_OVERRIDE = "claim.override"
     """An operator freed an idempotency claim by hand. The one operation in
     the system that can deliberately cause a duplicate side effect."""
@@ -115,7 +120,29 @@ PERMANENT_KINDS: frozenset[EventKind] = frozenset(
         # the override that unblocked it. Keeping only the override would leave
         # the record of *why* it was needed in the prunable tier.
         EventKind.CLAIM_HELD,
+        EventKind.CLAIM_RESOLVED,
         EventKind.CLAIM_OVERRIDE,
+        # Decisions are a conclusion too: the calibration record depends on the
+        # full history (docs/11 §5, D9 §6).
+        EventKind.DECISION,
+    }
+)
+
+#: Every kind must be either permanent or explicitly prunable. Adding a kind
+#: without classifying it fails ``test_every_kind_is_classified`` -- the choice
+#: is forced rather than defaulted, because the default would be "prunable".
+PRUNABLE_KINDS: frozenset[EventKind] = frozenset(
+    {
+        EventKind.USER_TURN, EventKind.AGENT_TURN, EventKind.AGENT_REASONING,
+        EventKind.AGENT_ACK, EventKind.SUBAGENT_SPAWN, EventKind.SUBAGENT_RESULT,
+        EventKind.SUBAGENT_ERROR, EventKind.TOOL_CALL, EventKind.TOOL_RESULT,
+        EventKind.TOOL_ERROR, EventKind.FILE_READ, EventKind.FILE_EDIT,
+        EventKind.FILE_CREATE, EventKind.FILE_DELETE, EventKind.COMMAND_RUN,
+        EventKind.CAPABILITY_INVOKE, EventKind.WATCH_FIRE, EventKind.SALIENCE_SCORE,
+        EventKind.DELIVERY, EventKind.DELIVERY_OUTCOME, EventKind.MEMORY_PROPOSE,
+        EventKind.SKILL_DRAFT, EventKind.AUDIO_SEGMENT, EventKind.SCREENSHOT,
+        EventKind.POV_CAPTURE, EventKind.SESSION_START, EventKind.SESSION_END,
+        EventKind.ERROR, EventKind.HEALTH,
     }
 )
 

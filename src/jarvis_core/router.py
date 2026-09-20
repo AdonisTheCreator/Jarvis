@@ -276,7 +276,9 @@ class CapabilityRouter:
                 # The claim is held here too -- and this is the most common way
                 # an action gets stranded, so it must be enumerable by kind
                 # like every other held claim.
-                self._record_claim_held(request, task, event.event.id, token, None)
+                self._record_claim_held(
+                    request, task, event.event.id, token, None, dispatch_failed=True
+                )
             raise
 
         state = self._state_of(backend, handle)
@@ -323,7 +325,9 @@ class CapabilityRouter:
         )
 
         if uncertain:
-            self._record_claim_held(request, task, event.event.id, token, state)
+            self._record_claim_held(
+                request, task, event.event.id, token, state, handle_id=handle.id
+            )
 
         return Invocation(
             decision=decision,
@@ -339,6 +343,9 @@ class CapabilityRouter:
         token: ClaimToken,
         outcome: ClaimOutcome,
         result_ref: str | None = None,
+        *,
+        session: str = "operator",
+        caused_by: str | None = None,
     ) -> bool:
         """Resolve a ``HELD`` claim once the caller knows what happened.
 
@@ -351,10 +358,33 @@ class CapabilityRouter:
         merely needs a human.
         """
         if outcome is ClaimOutcome.COMPLETED:
-            return self._idempotency.complete(token, result_ref)
-        if outcome is ClaimOutcome.RELEASED:
-            return self._idempotency.release(token)
-        raise ValueError(f"cannot resolve a claim as {outcome.value!r}")
+            applied = self._idempotency.complete(token, result_ref)
+        elif outcome is ClaimOutcome.RELEASED:
+            applied = self._idempotency.release(token)
+        else:
+            raise ValueError(f"cannot resolve a claim as {outcome.value!r}")
+
+        if applied:
+            # Close out the claim.held notice. Without this, an operator
+            # enumerating held claims by kind sees settled actions as stranded
+            # -- and retention makes that worse, since claim.held is permanent
+            # while the paired tool.result is prunable.
+            self._record.append(
+                make_event(
+                    EventKind.CLAIM_RESOLVED,
+                    actor=Actor.SYSTEM,
+                    session=session,
+                    subject_keys=("system",),
+                    parent=[caused_by] if caused_by else (),
+                    meta={
+                        "idempotency_key": token.key,
+                        "generation": token.generation,
+                        "outcome": outcome.value,
+                        "result_ref": result_ref,
+                    },
+                )
+            )
+        return applied
 
     def force_release(
         self,
@@ -443,6 +473,9 @@ class CapabilityRouter:
         caused_by: str,
         token: ClaimToken | None,
         state: TaskState | None,
+        *,
+        dispatch_failed: bool = False,
+        handle_id: str | None = None,
     ) -> None:
         """Note that a side effect's fate is undetermined.
 
@@ -460,7 +493,12 @@ class CapabilityRouter:
                 meta={
                     "capability": request.capability,
                     "idempotency_key": token.key if token else None,
+                    # "never dispatched" and "dispatched, status endpoint down"
+                    # both read as unknown state, but need opposite recovery
+                    # before an operator force-releases either.
                     "state": state.value if state else "unknown",
+                    "dispatch_failed": dispatch_failed,
+                    "handle": handle_id,
                     "note": "every retry of this action is blocked until resolved",
                 },
             )

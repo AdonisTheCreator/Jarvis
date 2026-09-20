@@ -7,7 +7,7 @@ import pytest
 from jarvis_core.errors import RecordIntegrityError, SubjectForgotten
 from jarvis_core.ids import content_hash, new_ulid, ulid_timestamp_ms
 from jarvis_core.record import Actor, EventKind, RecordStore, SubjectKeystore, make_event
-from jarvis_core.record.events import PERMANENT_KINDS, Event
+from jarvis_core.record.events import PERMANENT_KINDS, PRUNABLE_KINDS, Event
 
 
 def evt(**kw):
@@ -75,17 +75,28 @@ class TestEventSchema:
                      EventKind.MEMORY_FORGET, EventKind.KILLSWITCH):
             assert kind in PERMANENT_KINDS
 
-    def test_every_conclusion_kind_is_permanent(self):
-        """Conclusions -- decisions, approvals, forgets, and the claim story --
-        are the tier that must survive losing everything else. A hardcoded list
-        of four would not catch a new one being added to the prunable tier."""
-        conclusions = {
-            k for k in EventKind
-            if k.value.startswith(("policy.", "approval.", "claim.", "memory.write",
-                                   "memory.forget", "skill.approve", "killswitch"))
-        }
-        missing = conclusions - PERMANENT_KINDS
-        assert not missing, f"conclusion kinds in the prunable tier: {sorted(missing)}"
+    def test_every_kind_is_classified(self):
+        """Adding a kind must force a retention choice.
+
+        Matching on name prefixes only *looked* like coverage: EventKind.DECISION
+        escaped it and sat in the prunable tier despite docs/11 §5 putting
+        decisions in the permanent one. Every kind is now explicitly one or the
+        other, and a new one belongs to neither until someone decides.
+        """
+        unclassified = set(EventKind) - PERMANENT_KINDS - PRUNABLE_KINDS
+        assert not unclassified, (
+            f"unclassified event kinds: {sorted(k.value for k in unclassified)} -- "
+            "add each to PERMANENT_KINDS or PRUNABLE_KINDS"
+        )
+
+    def test_the_two_retention_tiers_do_not_overlap(self):
+        assert not (PERMANENT_KINDS & PRUNABLE_KINDS)
+
+    def test_the_claim_story_is_permanent_end_to_end(self):
+        """A blocked action, its resolution, and any manual override."""
+        for kind in (EventKind.CLAIM_HELD, EventKind.CLAIM_RESOLVED,
+                     EventKind.CLAIM_OVERRIDE, EventKind.DECISION):
+            assert kind in PERMANENT_KINDS
 
 
 class TestCryptoShredding:

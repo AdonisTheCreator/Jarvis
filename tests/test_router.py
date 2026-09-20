@@ -543,6 +543,66 @@ class TestClaimLifecycle:
         assert result.claim is ClaimOutcome.HELD and result.settled is False
         assert router.outstanding_claims() == [result.idempotency_key]
 
+    def test_resolving_closes_out_the_held_notice(self, registry, engine, store):
+        """Otherwise an operator enumerating held claims by kind sees settled
+        actions as stranded -- worse under retention, since claim.held is
+        permanent while the paired tool.result is prunable."""
+        class Pending(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.PENDING)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Pending("queue", ["ci.rerun_job"]))
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert len([s.event for s in store.scan(kinds=[EventKind.CLAIM_HELD])]) == 1
+
+        router.resolve(result.claim_token, ClaimOutcome.COMPLETED, "done")
+        resolved = [s.event for s in store.scan(kinds=[EventKind.CLAIM_RESOLVED])]
+        assert len(resolved) == 1 and resolved[0].is_permanent
+        assert resolved[0].meta["idempotency_key"] == result.idempotency_key
+        assert resolved[0].meta["outcome"] == "completed"
+
+    def test_a_refused_resolution_records_nothing(self, registry, engine, store):
+        class Failing(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.FAILED)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Failing("flaky", ["ci.rerun_job"]))
+        request = Request("ci.rerun_job", "j", {"job_id": "j"})
+        first = router.invoke(request)
+        router.invoke(request)  # supersedes it
+        assert router.resolve(first.claim_token, ClaimOutcome.COMPLETED) is False
+        assert [s.event for s in store.scan(kinds=[EventKind.CLAIM_RESOLVED])] == []
+
+    def test_never_dispatched_is_distinguishable_from_status_unreadable(
+        self, registry, engine, store
+    ):
+        """They need opposite recovery before an operator force-releases."""
+        class Exploding(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                raise RuntimeError("boom")
+
+        class Silent(FakeBackend):
+            def status(self, handle):
+                raise RuntimeError("status endpoint down")
+
+        never = RecordStore(store.root / "never", store._keystore)
+        r1 = CapabilityRouter(registry, engine, never)
+        r1.register_backend(Exploding("flaky", ["ci.rerun_job"]))
+        with pytest.raises(RuntimeError):
+            r1.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        held = [s.event for s in never.scan(kinds=[EventKind.CLAIM_HELD])][0]
+        assert held.meta["dispatch_failed"] is True and held.meta["handle"] is None
+
+        unreadable = RecordStore(store.root / "unreadable", store._keystore)
+        r2 = CapabilityRouter(registry, engine, unreadable)
+        r2.register_backend(Silent("silent", ["ci.rerun_job"]))
+        result = r2.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        held = [s.event for s in unreadable.scan(kinds=[EventKind.CLAIM_HELD])][0]
+        assert held.meta["dispatch_failed"] is False
+        assert held.meta["handle"] == result.handle.id
+
     def test_a_held_claim_is_resolved_with_its_token(self, registry, engine, store):
         class Pending(FakeBackend):
             def status(self, handle):
