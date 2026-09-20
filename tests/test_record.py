@@ -1,6 +1,7 @@
 """The Record: append-only integrity, sealing, and crypto-shredding."""
 import json
 import os
+import threading
 
 import pytest
 
@@ -252,6 +253,93 @@ class TestRecordStore:
         fresh = reopened.append(evt(subject_keys=["person:guest"]), b"same content")
         assert reopened.payload(fresh.event) == b"same content"
 
+    def test_a_write_racing_a_forget_is_not_silently_lost(self, store: RecordStore):
+        """The destroy and the bump have to be one atomic step. Between them
+        the epoch reads stale, so an append lands in the *old* namespace,
+        dedups onto a blob sealed under the key just destroyed, and a write
+        that returned successfully reads back as forgotten."""
+        old = store.append(evt(subject_keys=["person:guest"]), b"same content")
+
+        destroying, appended = threading.Event(), threading.Event()
+        destroy = store._keystore.forget
+
+        def watched_forget(subject: str) -> bool:
+            destroying.set()
+            appended.wait(0.15)   # the appender must be held off, not raced
+            return destroy(subject)
+
+        store._keystore.forget = watched_forget
+        forgetter = threading.Thread(
+            target=store.forget_subject, args=("person:guest",), daemon=True
+        )
+        forgetter.start()
+        assert destroying.wait(1.0)
+        try:
+            stored = store.append(evt(subject_keys=["person:guest"]), b"same content")
+        finally:
+            appended.set()
+        forgetter.join(2.0)
+
+        assert store.payload(stored.event) == b"same content"   # not lost
+        assert store.payload_or_none(old.event) is None         # still forgotten
+        assert store.verify() == 2
+
+    def test_the_epoch_advances_before_the_key_is_destroyed(self, store: RecordStore):
+        """Bumping second is unrepairable: the retried forget returns False
+        because the key is already gone, so the epoch stays behind and the
+        next identical write dedups onto a blob nobody can open again."""
+        store.append(evt(subject_keys=["person:guest"]), b"same content")
+
+        def unavailable(subject: str) -> bool:
+            raise OSError("keyring unavailable")
+
+        store._keystore.forget = unavailable
+        with pytest.raises(OSError):
+            store.forget_subject("person:guest")
+        assert store.current_epoch("person:guest") == 2
+
+        del store._keystore.forget          # the keyring comes back
+        assert store.forget_subject("person:guest")
+        stored = store.append(evt(subject_keys=["person:guest"]), b"same content")
+        assert store.payload(stored.event) == b"same content"
+
+    def test_an_unreadable_epoch_fails_closed(self, store: RecordStore):
+        """Returning 1 for a corrupt EPOCH file collapses the namespace back
+        onto e1/, which is exactly where the blobs of a destroyed key live.
+        An *absent* file is a different fact and still means epoch 1."""
+        assert store.current_epoch("person:guest") == 1     # nothing forgotten yet
+
+        store.append(evt(subject_keys=["person:guest"]), b"private")
+        store.forget_subject("person:guest")
+        store._epoch_path("person:guest").write_text("e2", encoding="utf-8")
+
+        with pytest.raises(RecordIntegrityError):
+            store.current_epoch("person:guest")
+        with pytest.raises(RecordIntegrityError):
+            store.append(evt(subject_keys=["person:guest"]), b"private")
+
+    def test_a_failed_seal_does_not_strand_the_epoch_lock(self, store: RecordStore):
+        """acquire() sat above its try:, so a raise in between held the lock
+        for the life of the process and every later append and forget hung."""
+        def offline(*args, **kwargs):
+            raise RuntimeError("HSM offline")
+
+        store._keystore.seal = offline
+        with pytest.raises(RuntimeError):
+            store.append(evt(subject_keys=["person:guest"]), b"private")
+        del store._keystore.seal
+
+        recovered = threading.Event()
+
+        def retry() -> None:
+            store.append(evt(subject_keys=["person:guest"]), b"private")
+            store.forget_subject("person:guest")
+            recovered.set()
+
+        thread = threading.Thread(target=retry, daemon=True)
+        thread.start()
+        assert recovered.wait(2.0), "the epoch lock was never released"
+
     def test_reading_never_resurrects_a_shredded_subject(self, store: RecordStore):
         """With a real keyring this would write a fresh key for a subject the
         user asked to erase."""
@@ -279,8 +367,6 @@ class TestRecordStore:
     def test_concurrent_writes_of_one_payload_all_land(self, store: RecordStore):
         """A shared temp path races: writers destroy each other's file and
         their events never reach the log."""
-        import threading
-
         payload = b"x" * 200_000
         errors: list[Exception] = []
         lock = threading.Lock()
