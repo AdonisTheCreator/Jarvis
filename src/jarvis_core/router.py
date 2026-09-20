@@ -213,10 +213,14 @@ class CapabilityRouter:
             )
             raise
 
-        settled = self._settle_claim(backend, handle, key)
+        state = self._state_of(backend, handle)
+        settled = self._settle_claim(key, state)
+        failed = state in {TaskState.FAILED, TaskState.CANCELLED, TaskState.INTERRUPTED}
         self._record.append(
             make_event(
-                EventKind.TOOL_RESULT,
+                # A backend that reports failure immediately must not be
+                # recorded as a result, or the trail cannot tell it from success.
+                EventKind.TOOL_ERROR if failed else EventKind.TOOL_RESULT,
                 actor=Actor.SYSTEM,
                 session=request.session,
                 subject_keys=task.subject_keys or ("system",),
@@ -225,7 +229,9 @@ class CapabilityRouter:
                     "capability": request.capability,
                     "backend": backend.id,
                     "handle": handle.id,
+                    "state": state.value if state else "unknown",
                     "settled": settled,
+                    "effect_uncertain": state is TaskState.INTERRUPTED,
                 },
             )
         )
@@ -239,14 +245,30 @@ class CapabilityRouter:
             settled=settled,
         )
 
-    def settle(self, backend: AgentBackend, handle: TaskHandle) -> bool:
+    def settle(
+        self,
+        backend: AgentBackend,
+        handle: TaskHandle,
+        idempotency_key: str | None = None,
+    ) -> bool:
         """Resolve an in-flight claim for an asynchronous task.
 
         A queued effect that later fails must not stay recorded as done, or the
         legitimate retry is suppressed and the message is never sent. Callers
         poll this until it returns True.
+
+        The key must be supplied (from :attr:`Invocation.idempotency_key`) or
+        echoed by the adapter on the handle. The ``AgentBackend`` contract does
+        not *require* adapters to echo it, so relying on the handle alone would
+        silently return "resolved" while leaving the claim in flight forever.
         """
-        return self._settle_claim(backend, handle, handle.idempotency_key)
+        key = idempotency_key or handle.idempotency_key
+        if key is None:
+            raise ValueError(
+                "settle() needs the idempotency key -- pass Invocation.idempotency_key; "
+                "the backend contract does not require adapters to echo it on the handle"
+            )
+        return self._settle_claim(key, self._state_of(backend, handle))
 
     # -- internals -------------------------------------------------------
 
@@ -270,15 +292,26 @@ class CapabilityRouter:
                 f"task {task.capability!r}->{task.target!r} does not match authorized "
                 f"request {request.capability!r}->{request.target!r}"
             )
+        if dict(task.params) != dict(request.params):
+            # The approval token is fingerprinted over request.params. Letting
+            # the task carry different ones would execute an action the human
+            # never saw -- the precise hole this guard exists to close.
+            raise TaskMismatch(
+                f"task params for {request.capability!r} differ from the authorized request; "
+                "the approval was bound to the request's parameters"
+            )
         return replace(task, session=request.session)
 
     def _record_decision(self, request: Request, decision: Decision, actor: Actor) -> None:
         """Write every policy outcome, including refusals."""
-        kind = {
-            Outcome.ALLOW: EventKind.POLICY_DECISION,
-            Outcome.DENY: EventKind.APPROVAL_DENY,
-            Outcome.REQUIRE_APPROVAL: EventKind.APPROVAL_REQUEST,
-        }[decision.outcome]
+        # A refusal by the engine is a POLICY_DECISION. APPROVAL_DENY is
+        # reserved for a denial a *human* actually made -- conflating the two
+        # would make "the kill switch stopped it" look like "you said no".
+        kind = (
+            EventKind.APPROVAL_REQUEST
+            if decision.outcome is Outcome.REQUIRE_APPROVAL
+            else EventKind.POLICY_DECISION
+        )
         self._record.append(
             make_event(
                 kind,
@@ -293,6 +326,7 @@ class CapabilityRouter:
                     "reason": decision.reason,
                     "autonomy": decision.autonomy.label if decision.autonomy else None,
                     "quarantined": request.quarantined,
+                    "approval_request_id": decision.approval_request_id,
                 },
             )
         )
@@ -313,24 +347,34 @@ class CapabilityRouter:
             raise DuplicateSuppressed(key, claim.state.value)
         return key
 
-    def _settle_claim(
-        self, backend: AgentBackend, handle: TaskHandle, key: str | None
-    ) -> bool:
-        """Complete or release a claim based on the backend's real state."""
+    @staticmethod
+    def _state_of(backend: AgentBackend, handle: TaskHandle) -> TaskState | None:
+        try:
+            return backend.status(handle).state
+        except Exception:
+            return None  # unknown: never guess about a side effect
+
+    def _settle_claim(self, key: str | None, state: TaskState | None) -> bool:
+        """Complete or release a claim. Returns True when polling can stop.
+
+        Covers every terminal state, including ``INTERRUPTED`` -- omitting it
+        would leave a documented "poll until True" loop running forever.
+        """
         if key is None:
             return True
-        try:
-            state = backend.status(handle).state
-        except Exception:
-            return False  # unknown: leave in flight rather than guess
         if state is TaskState.SUCCEEDED:
-            self._idempotency.complete(key, handle.id)
+            self._idempotency.complete(key)
             return True
         if state in {TaskState.FAILED, TaskState.CANCELLED}:
             # Definitively did not take effect -- a retry is legitimate.
             self._release(key)
             return True
-        return False  # still running: the claim is correctly in flight
+        if state is TaskState.INTERRUPTED:
+            # Terminal, but the effect may have partly landed. Stop polling and
+            # leave the claim in flight: a stuck claim needs a human, and that
+            # is the correct outcome here rather than a guess either way.
+            return True
+        return False  # pending, running, awaiting approval, or unknown
 
     def _release(self, key: str | None) -> None:
         if key is not None:

@@ -223,15 +223,25 @@ class TestReviewFindings:
         for capability in ("ci.read_status", "ci.rerun_job", "message.send"):
             with pytest.raises(PolicyDenied):
                 router.invoke(Request(capability, "t", quarantined=True))
-        denials = [s.event for s in store.scan(kinds=[EventKind.APPROVAL_DENY])]
-        assert len(denials) == 3
-        assert all(e.meta["quarantined"] is True for e in denials)
+        decisions = [s.event for s in store.scan(kinds=[EventKind.POLICY_DECISION])]
+        assert len(decisions) == 3
+        assert all(e.meta["quarantined"] is True for e in decisions)
 
-    def test_an_approval_gate_is_recorded_as_a_request(self, router, store: RecordStore):
-        with pytest.raises(ApprovalRequired):
+    def test_machine_refusals_are_not_recorded_as_human_denials(self, router, store):
+        """'The kill switch stopped it' must not read as 'you said no'."""
+        with pytest.raises(PolicyDenied):
+            router.invoke(Request("vehicle.drive", "car"))
+        assert [s.event for s in store.scan(kinds=[EventKind.APPROVAL_DENY])] == []
+        decisions = [s.event for s in store.scan(kinds=[EventKind.POLICY_DECISION])]
+        assert decisions[-1].meta["outcome"] == "deny"
+
+    def test_an_approval_gate_is_recorded_as_a_correlatable_request(self, router, store):
+        """The recorded event must carry the id the user actually acts on."""
+        with pytest.raises(ApprovalRequired) as caught:
             router.invoke(Request("message.send", "sam", {"to": "sam", "body": "hi"}))
         requests = [s.event for s in store.scan(kinds=[EventKind.APPROVAL_REQUEST])]
         assert len(requests) == 1 and requests[0].is_permanent
+        assert requests[0].meta["approval_request_id"] == caught.value.request_id
 
     def test_unknown_capability_raises_the_documented_refusal_type(self, router):
         """Not a raw KeyError -- callers catch PolicyDenied."""
@@ -252,6 +262,70 @@ class TestReviewFindings:
             router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
         kinds = [e.kind for e in AuditProjection(store).trail()]
         assert EventKind.TOOL_ERROR in kinds
+
+
+class TestSecondReviewFindings:
+    """Regression coverage for the second review round."""
+
+    def test_task_params_cannot_differ_from_the_authorized_request(self, router):
+        """The approval is fingerprinted over request.params; a task carrying
+        different ones would execute an action the human never saw."""
+        with pytest.raises(TaskMismatch, match="params"):
+            router.invoke(
+                Request("ci.rerun_job", "j", {"job_id": "j"}),
+                Task("ci.rerun_job", "j", {"job_id": "SOMETHING-ELSE"}),
+            )
+
+    def test_matching_params_are_accepted(self, router):
+        params = {"job_id": "j"}
+        result = router.invoke(Request("ci.rerun_job", "j", params),
+                               Task("ci.rerun_job", "j", params))
+        assert result.handle is not None
+
+    def test_settle_refuses_to_pretend_without_a_key(self, registry, engine, store):
+        """Adapters are not required to echo the key; silently returning
+        'resolved' would strand the claim forever."""
+        class Bare(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                self.executions.append((task, idempotency_key))
+                return TaskHandle(id=new_ulid(), backend_id=self.id)  # no key echoed
+
+        router = CapabilityRouter(registry, engine, store)
+        backend = Bare("bare", ["ci.rerun_job"])
+        router.register_backend(backend)
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        with pytest.raises(ValueError, match="needs the idempotency key"):
+            router.settle(backend, result.handle)
+        # Supplying it from the Invocation works.
+        assert router.settle(backend, result.handle, result.idempotency_key) is True
+
+    def test_interrupted_is_terminal_so_polling_terminates(self, registry, engine, store):
+        class Interrupted(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.INTERRUPTED)
+
+        router = CapabilityRouter(registry, engine, store)
+        backend = Interrupted("stopped", ["ci.rerun_job"])
+        router.register_backend(backend)
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert result.settled is True  # polling ends
+        # The claim stays in flight: an interrupted effect may have partly landed.
+        with pytest.raises(DuplicateSuppressed):
+            router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+
+    def test_an_immediately_failing_backend_is_not_recorded_as_a_result(
+        self, registry, engine, store
+    ):
+        class Failing(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.FAILED)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Failing("flaky", ["ci.rerun_job"]))
+        router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert [s.event for s in store.scan(kinds=[EventKind.TOOL_RESULT])] == []
+        errors = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])]
+        assert len(errors) == 1 and errors[0].meta["state"] == "failed"
 
 
 class TestScriptedWorkload:
