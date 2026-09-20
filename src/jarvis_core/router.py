@@ -269,20 +269,26 @@ class CapabilityRouter:
 
         state = self._state_of(backend, handle)
         outcome = self._resolve_at_dispatch(token, state, handle)
-        # Uncertainty is derived from the claim outcome rather than computed
-        # separately, so the Record and the ledger cannot disagree. A HELD
-        # claim means exactly "we cannot say whether the effect landed" --
-        # whether because the task is still running, was interrupted, was
-        # cancelled after the provider may have accepted it, or because
-        # status() raised. An operator reading a held claim as certain would
-        # force_release it and the action would run twice.
-        uncertain = outcome is ClaimOutcome.HELD
-        failed = uncertain or state is TaskState.FAILED
+        # Two independent facts, and conflating them is what kept producing
+        # wrong events:
+        #
+        #   how did the DISPATCH go?      -> TOOL_RESULT or TOOL_ERROR
+        #   did the SIDE EFFECT land?     -> effect_uncertain
+        #
+        # A task that is running healthily dispatched fine (a result) while its
+        # effect is not yet determined (uncertain). A task that FAILED went
+        # wrong (an error) but its effect is known -- it did not happen.
+        went_wrong = state is None or state in {
+            TaskState.FAILED, TaskState.CANCELLED, TaskState.INTERRUPTED
+        }
+        uncertain = state is None or (
+            state is not TaskState.SUCCEEDED and not state.guarantees_no_effect
+        )
         self._record.append(
             make_event(
                 # A backend that reports failure immediately must not be
                 # recorded as a result, or the trail cannot tell it from success.
-                EventKind.TOOL_ERROR if failed else EventKind.TOOL_RESULT,
+                EventKind.TOOL_ERROR if went_wrong else EventKind.TOOL_RESULT,
                 actor=Actor.SYSTEM,
                 session=request.session,
                 subject_keys=task.subject_keys or ("system",),
@@ -333,7 +339,7 @@ class CapabilityRouter:
         self,
         key: str,
         *,
-        operator: str = "user",
+        operator: str = "user",  # same prefixed form as Request.actor
         reason: str = "",
         session: str = "operator",
         caused_by: str | None = None,
@@ -352,6 +358,10 @@ class CapabilityRouter:
         reason -- it is the one operation that can deliberately cause a
         duplicate effect, so it must never be invisible.
 
+        ``operator`` takes the same prefixed form as :attr:`Request.actor`
+        (``"user:harrison"``, ``"watcher:claim-gc"``), so an automated caller
+        is not recorded as a person authorizing a duplicate effect.
+
         Pass ``session`` and ``caused_by`` (the stranded invoke's event id) so
         the override lands in the affected session's audit trail and in the
         causal walk from the invocation it unblocks. Without them the only
@@ -360,27 +370,38 @@ class CapabilityRouter:
         claim = self._idempotency.peek(key)
         if claim is None:
             return False
-        # Record *before* releasing. If the append fails the claim survives,
-        # which is the safe direction: an unrecorded override that already
-        # freed the claim looks to the caller like it failed while the action
-        # is now unblocked.
-        self._record.append(
-            make_event(
-                EventKind.CLAIM_OVERRIDE,
-                actor=_actor_of(operator),
-                actor_id=operator,
-                session=session,
-                subject_keys=("system",),
-                parent=[caused_by] if caused_by else (),
-                meta={
-                    "idempotency_key": key,
-                    "generation": claim.generation,
-                    "reason": reason,
-                    "note": "a released claim permits the action to run again",
-                },
+        # The release is authoritative, so it happens first and only a release
+        # that actually occurred is recorded -- otherwise the trail claims an
+        # override that never happened. The residual risk is the reverse: if
+        # the append fails, a freed claim goes unrecorded. That is re-raised
+        # with the key so it can be reconciled, and a Record that cannot accept
+        # a write is a system-wide failure anyway, since every invoke writes.
+        released = self._idempotency.release(claim.token)
+        if not released:
+            return False
+        try:
+            self._record.append(
+                make_event(
+                    EventKind.CLAIM_OVERRIDE,
+                    actor=_actor_of(operator),
+                    actor_id=operator,
+                    session=session,
+                    subject_keys=("system",),
+                    parent=[caused_by] if caused_by else (),
+                    meta={
+                        "idempotency_key": key,
+                        "generation": claim.generation,
+                        "reason": reason,
+                        "note": "a released claim permits the action to run again",
+                    },
+                )
             )
-        )
-        return self._idempotency.release(claim.token)
+        except Exception as exc:  # noqa: BLE001 -- surface, never swallow
+            raise JarvisCoreError(
+                f"claim {key} was released but the override could not be recorded; "
+                "reconcile manually"
+            ) from exc
+        return True
 
     def outstanding_claims(self) -> list[str]:
         """Idempotency keys held but unresolved.

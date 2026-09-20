@@ -335,7 +335,7 @@ class TestClaimLifecycle:
         invoke_event = [s.event for s in store.scan(kinds=[EventKind.CAPABILITY_INVOKE])][0]
         key = router.outstanding_claims()[0]
         assert router.force_release(
-            key, operator="harrison", reason="verified not sent",
+            key, operator="user:harrison", reason="verified not sent",
             session="s1", caused_by=invoke_event.id,
         )
 
@@ -343,7 +343,8 @@ class TestClaimLifecycle:
         assert len(overrides) == 1
         assert overrides[0].is_permanent
         assert overrides[0].meta["reason"] == "verified not sent"
-        assert overrides[0].actor_id == "harrison"
+        assert overrides[0].actor_id == "user:harrison"
+        assert overrides[0].actor is Actor.USER
         assert EventKind.CLAIM_OVERRIDE in [e.kind for e in AuditProjection(store).trail()]
         # Reachable from the affected session and from the invocation it unblocks.
         assert EventKind.CLAIM_OVERRIDE in [
@@ -368,21 +369,53 @@ class TestClaimLifecycle:
         override = [s.event for s in store.scan(kinds=[EventKind.CLAIM_OVERRIDE])][0]
         assert override.actor is Actor.WATCHER
 
-    def test_a_held_claim_is_always_recorded_as_uncertain(self, registry, engine, store):
-        """Whatever the reason it is held, the Record must agree with the ledger."""
-        for state in (TaskState.PENDING, TaskState.RUNNING, TaskState.AWAITING_APPROVAL,
-                      TaskState.CANCELLED, TaskState.INTERRUPTED):
-            class Held(FakeBackend):
-                def status(self, handle, _s=state):
-                    return TaskStatus(handle=handle, state=_s)
+    @pytest.mark.parametrize(
+        "state,expect_error,expect_uncertain",
+        [
+            (TaskState.SUCCEEDED, False, False),   # dispatched fine, effect landed
+            (TaskState.FAILED, True, False),       # went wrong, effect known absent
+            (TaskState.CANCELLED, True, True),     # went wrong, effect unknown
+            (TaskState.INTERRUPTED, True, True),
+            (TaskState.PENDING, False, True),      # healthy in flight, effect undetermined
+            (TaskState.RUNNING, False, True),
+            (None, True, True),                    # status() raised
+        ],
+    )
+    def test_dispatch_outcome_and_effect_certainty_are_separate(
+        self, registry, engine, store, state, expect_error, expect_uncertain
+    ):
+        """Conflating 'how did the dispatch go' with 'did the effect land' is
+        what produced wrong events: healthy running work is not a failure, and
+        a failure is not uncertain."""
+        class Reporting(FakeBackend):
+            def status(self, handle):
+                if state is None:
+                    raise RuntimeError("status endpoint down")
+                return TaskStatus(handle=handle, state=state)
 
-            fresh_store = RecordStore(store.root / f"r-{state.value}", store._keystore)
-            router = CapabilityRouter(registry, engine, fresh_store)
-            router.register_backend(Held("held", ["ci.rerun_job"]))
-            result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-            assert result.claim is ClaimOutcome.HELD
-            events = [s.event for s in fresh_store.scan(kinds=[EventKind.TOOL_ERROR])]
-            assert events[-1].meta["effect_uncertain"] is True, state
+        fresh = RecordStore(store.root / f"d-{state.value if state else 'none'}",
+                            store._keystore)
+        router = CapabilityRouter(registry, engine, fresh)
+        router.register_backend(Reporting("r", ["ci.rerun_job"]))
+        router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+
+        kind = EventKind.TOOL_ERROR if expect_error else EventKind.TOOL_RESULT
+        events = [s.event for s in fresh.scan(kinds=[kind])]
+        assert len(events) == 1, f"{state} should be a {kind.value}"
+        assert events[0].meta["effect_uncertain"] is expect_uncertain
+
+    def test_a_failed_read_still_reaches_the_audit_trail(self, registry, engine, store):
+        """Read-only work has no claim, but a failed read must not vanish."""
+        from jarvis_core.record.projections import AuditProjection
+
+        class Silent(FakeBackend):
+            def status(self, handle):
+                raise RuntimeError("status endpoint down")
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Silent("silent", ["ci.read_status"]))
+        router.invoke(Request("ci.read_status", "repo"))
+        assert EventKind.TOOL_ERROR in [e.kind for e in AuditProjection(store).trail()]
 
     def test_a_failed_override_records_nothing(self, router, store: RecordStore):
         assert router.force_release("no-such-key") is False
