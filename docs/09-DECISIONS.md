@@ -701,8 +701,11 @@ stays small.**
   so every retry shares its predecessor's key — this is the central hazard.)
 - No handle bindings, so no collisions, no staleness, no durability gap.
 - `HELD` means one thing: *not knowable yet, so the action stays blocked*. The
-  earlier `PENDING`/`STUCK`/`UNKNOWN`/`ALREADY_RESOLVED` split existed to
-  paper over ambiguities the bindings created.
+  earlier `PENDING`/`STUCK`/`UNKNOWN` split existed to paper over ambiguities
+  the bindings created. (`ALREADY_RESOLVED` went with them and was restored two
+  rounds later: "someone else resolved it first" turned out to be a genuinely
+  distinct fact rather than an artefact of the bindings. Cutting it was one
+  step too far.)
 - Anything unclear — pending, interrupted, or a `status()` call that raised —
   holds the claim. Guessing in either direction sends the message twice or
   never.

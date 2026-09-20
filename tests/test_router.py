@@ -612,18 +612,22 @@ class TestClaimLifecycle:
         assert result.effect_landed is True
 
     @pytest.mark.parametrize(
-        "state,expected",
+        "capability,state,expected",
         [
-            (TaskState.SUCCEEDED, True),
-            (TaskState.FAILED, False),
-            (TaskState.CANCELLED, None),
-            (TaskState.INTERRUPTED, None),
-            (TaskState.PENDING, None),
-            (None, None),
+            ("ci.rerun_job", TaskState.SUCCEEDED, True),
+            ("ci.rerun_job", TaskState.FAILED, False),
+            ("ci.rerun_job", TaskState.CANCELLED, None),
+            ("ci.rerun_job", TaskState.INTERRUPTED, None),
+            ("ci.rerun_job", TaskState.PENDING, None),
+            ("ci.rerun_job", None, None),
+            # A read has no effect to have landed. Reporting True would make a
+            # caller refuse to retry something always safe to retry.
+            ("ci.read_status", TaskState.SUCCEEDED, None),
+            ("ci.read_status", TaskState.FAILED, None),
         ],
     )
     def test_effect_landed_is_independent_of_the_claim_outcome(
-        self, registry, engine, store, state, expected
+        self, registry, engine, store, capability, state, expected
     ):
         """ALREADY_RESOLVED arises from both a success and a failure, so a
         caller deciding retry-safety needs this fact separately."""
@@ -633,12 +637,35 @@ class TestClaimLifecycle:
                     raise RuntimeError("status endpoint down")
                 return TaskStatus(handle=handle, state=state)
 
-        fresh = RecordStore(store.root / f"el-{state.value if state else 'none'}",
-                            store._keystore)
+        label = f"el-{capability}-{state.value if state else 'none'}"
+        fresh = RecordStore(store.root / label, store._keystore)
         router = CapabilityRouter(registry, engine, fresh)
-        router.register_backend(Reporting("r", ["ci.rerun_job"]))
-        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        router.register_backend(Reporting("r", [capability]))
+        params = {"job_id": "j"} if capability == "ci.rerun_job" else {}
+        result = router.invoke(Request(capability, "j", params))
         assert result.effect_landed is expected
+
+    def test_already_resolved_from_a_failure_is_safe_to_retry(
+        self, registry, engine, store
+    ):
+        """The half that produced the wrong retry decision: same claim
+        outcome, opposite effect."""
+        class RacyFailure(FakeBackend):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.router = None
+
+            def status(self, handle):
+                self.router.force_release(self.router.outstanding_claims()[0])
+                return TaskStatus(handle=handle, state=TaskState.FAILED)
+
+        router = CapabilityRouter(registry, engine, store)
+        backend = RacyFailure("racy", ["ci.rerun_job"])
+        backend.router = router
+        router.register_backend(backend)
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert result.claim is ClaimOutcome.ALREADY_RESOLVED
+        assert result.effect_landed is False  # safe to retry
 
     def test_a_held_notice_can_be_matched_to_its_closer(self, registry, engine, store):
         """Keys hash the action, so attempts share a key; only the generation

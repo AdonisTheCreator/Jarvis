@@ -102,7 +102,9 @@ class Invocation:
     backend_id: str | None
     event_id: str
     effect_landed: bool | None = None
-    """Whether the side effect happened: True, False, or None for unknown.
+    """Whether the side effect happened: True, False, or None when there is
+    nothing to know -- either an unclear outcome, or a read with no effect at
+    all.
 
     Deliberately separate from :attr:`claim`. The claim says who owns the
     ledger row; this says whether retrying is safe, and the two genuinely come
@@ -126,8 +128,15 @@ class Invocation:
         return self.claim.resolved
 
 
-def _effect_landed(state: TaskState | None) -> bool | None:
-    """Did the side effect happen? True, False, or None for not knowable."""
+def _effect_landed(state: TaskState | None, *, side_effecting: bool) -> bool | None:
+    """Did the side effect happen? True, False, or None for not knowable.
+
+    ``None`` for a read, because there is no effect to have landed. Reporting
+    True there would make a caller refuse to retry an always-safe read, and
+    would put two facts back into one field.
+    """
+    if not side_effecting:
+        return None
     if state is TaskState.SUCCEEDED:
         return True
     if state is not None and state.guarantees_no_effect:
@@ -361,7 +370,7 @@ class CapabilityRouter:
 
         return Invocation(
             decision=decision,
-            effect_landed=_effect_landed(state),
+            effect_landed=_effect_landed(state, side_effecting=token is not None),
             session=request.session,
             subject_keys=task.subject_keys or ("system",),
             handle=handle,
