@@ -556,11 +556,34 @@ class TestClaimLifecycle:
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
         assert len([s.event for s in store.scan(kinds=[EventKind.CLAIM_HELD])]) == 1
 
-        router.resolve(result.claim_token, ClaimOutcome.COMPLETED, "done")
+        router.resolve(
+            result.claim_token, ClaimOutcome.COMPLETED, "done",
+            session="s1", subject_keys=("system",), caused_by=result.event_id,
+        )
         resolved = [s.event for s in store.scan(kinds=[EventKind.CLAIM_RESOLVED])]
         assert len(resolved) == 1 and resolved[0].is_permanent
         assert resolved[0].meta["idempotency_key"] == result.idempotency_key
         assert resolved[0].meta["outcome"] == "completed"
+
+    def test_a_resolution_lands_in_the_same_trail_as_the_held_notice(
+        self, registry, engine, store
+    ):
+        """Otherwise the held claim still reads as stranded in that session."""
+        from jarvis_core.record.projections import AuditProjection
+
+        class Pending(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.PENDING)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Pending("queue", ["ci.rerun_job"]))
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}, session="s1"))
+        router.resolve(
+            result.claim_token, ClaimOutcome.COMPLETED, "done",
+            session="s1", caused_by=result.event_id,
+        )
+        kinds = [e.kind for e in AuditProjection(store).trail(session="s1")]
+        assert EventKind.CLAIM_HELD in kinds and EventKind.CLAIM_RESOLVED in kinds
 
     def test_a_refused_resolution_records_nothing(self, registry, engine, store):
         class Failing(FakeBackend):

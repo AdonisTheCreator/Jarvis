@@ -125,6 +125,12 @@ PERMANENT_KINDS: frozenset[EventKind] = frozenset(
         # Decisions are a conclusion too: the calibration record depends on the
         # full history (docs/11 §5, D9 §6).
         EventKind.DECISION,
+        # Audit kinds must be permanent, or the trail outlives its own
+        # evidence: a permanent claim.held whose parent invoke was pruned
+        # leaves AuditProjection.why() unable to say under what authority the
+        # blocked action ran. Text is the cheap part of the Record (docs/11 §4).
+        EventKind.CAPABILITY_INVOKE,
+        EventKind.TOOL_ERROR,
     }
 )
 
@@ -136,9 +142,9 @@ PRUNABLE_KINDS: frozenset[EventKind] = frozenset(
         EventKind.USER_TURN, EventKind.AGENT_TURN, EventKind.AGENT_REASONING,
         EventKind.AGENT_ACK, EventKind.SUBAGENT_SPAWN, EventKind.SUBAGENT_RESULT,
         EventKind.SUBAGENT_ERROR, EventKind.TOOL_CALL, EventKind.TOOL_RESULT,
-        EventKind.TOOL_ERROR, EventKind.FILE_READ, EventKind.FILE_EDIT,
+        EventKind.FILE_READ, EventKind.FILE_EDIT,
         EventKind.FILE_CREATE, EventKind.FILE_DELETE, EventKind.COMMAND_RUN,
-        EventKind.CAPABILITY_INVOKE, EventKind.WATCH_FIRE, EventKind.SALIENCE_SCORE,
+        EventKind.WATCH_FIRE, EventKind.SALIENCE_SCORE,
         EventKind.DELIVERY, EventKind.DELIVERY_OUTCOME, EventKind.MEMORY_PROPOSE,
         EventKind.SKILL_DRAFT, EventKind.AUDIO_SEGMENT, EventKind.SCREENSHOT,
         EventKind.POV_CAPTURE, EventKind.SESSION_START, EventKind.SESSION_END,

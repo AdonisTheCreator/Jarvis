@@ -92,6 +92,18 @@ class TestEventSchema:
     def test_the_two_retention_tiers_do_not_overlap(self):
         assert not (PERMANENT_KINDS & PRUNABLE_KINDS)
 
+    def test_every_audit_kind_is_permanent(self):
+        """Otherwise the trail outlives its own evidence: a permanent
+        claim.held whose parent invoke was pruned leaves why() unable to say
+        under what authority the blocked action ran."""
+        from jarvis_core.record.projections import AUDIT_KINDS
+
+        prunable_audit = AUDIT_KINDS & PRUNABLE_KINDS
+        assert not prunable_audit, (
+            f"audit kinds in the prunable tier: "
+            f"{sorted(k.value for k in prunable_audit)}"
+        )
+
     def test_the_claim_story_is_permanent_end_to_end(self):
         """A blocked action, its resolution, and any manual override."""
         for kind in (EventKind.CLAIM_HELD, EventKind.CLAIM_RESOLVED,

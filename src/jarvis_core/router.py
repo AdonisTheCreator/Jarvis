@@ -345,6 +345,7 @@ class CapabilityRouter:
         result_ref: str | None = None,
         *,
         session: str = "operator",
+        subject_keys: tuple[str, ...] = ("system",),
         caused_by: str | None = None,
     ) -> bool:
         """Resolve a ``HELD`` claim once the caller knows what happened.
@@ -352,6 +353,12 @@ class CapabilityRouter:
         The token carries the attempt's generation, so a late resolution from
         an abandoned attempt cannot settle a newer one that shares the key.
         Returns False when the token has been superseded.
+
+        Pass ``session``, ``subject_keys`` and ``caused_by`` from the original
+        :class:`Invocation`, so the resolution lands in the same session's
+        audit trail as the ``claim.held`` it closes. Left at their defaults the
+        held notice still reads as stranded in that session's trail, which is
+        the thing this event exists to prevent.
 
         Use ``RELEASED`` only when the side effect provably did not happen: a
         wrongly released claim sends the message twice, while a claim left held
@@ -364,17 +371,21 @@ class CapabilityRouter:
         else:
             raise ValueError(f"cannot resolve a claim as {outcome.value!r}")
 
-        if applied:
-            # Close out the claim.held notice. Without this, an operator
-            # enumerating held claims by kind sees settled actions as stranded
-            # -- and retention makes that worse, since claim.held is permanent
-            # while the paired tool.result is prunable.
+        if not applied:
+            return False
+
+        # Close out the claim.held notice. The ledger is already mutated, so a
+        # failure here leaves a settled claim with no closing event that no
+        # retry can write -- both resolve() and force_release() would be
+        # refused by the state and generation checks. Surface it rather than
+        # swallow it, exactly as force_release does.
+        try:
             self._record.append(
                 make_event(
                     EventKind.CLAIM_RESOLVED,
                     actor=Actor.SYSTEM,
                     session=session,
-                    subject_keys=("system",),
+                    subject_keys=subject_keys,
                     parent=[caused_by] if caused_by else (),
                     meta={
                         "idempotency_key": token.key,
@@ -384,7 +395,12 @@ class CapabilityRouter:
                     },
                 )
             )
-        return applied
+        except Exception as exc:  # noqa: BLE001 -- surface, never swallow
+            raise JarvisCoreError(
+                f"claim {token.key} was resolved as {outcome.value} but the closing "
+                "event could not be recorded; reconcile manually"
+            ) from exc
+        return True
 
     def force_release(
         self,
