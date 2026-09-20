@@ -517,3 +517,81 @@ situational awareness about places and conditions, never about people.** No trac
 individuals, no following named vessels or aircraft, no building a picture of where someone is.
 MIT licensing means we can self-host and enforce that by removing capabilities, not just by
 policy.
+
+---
+
+## D17 — **Routing policy is spoken, persistent, and position-scoped**
+**Date:** 2026-09-20 · **Status:** Decided · **Detail:** [`17-ROUTING-POLICY.md`](17-ROUTING-POLICY.md)
+
+**Decision.** Add `route.policy.*` (`set` / `exclude` / `allow_override` / `list` / `clear`) as
+A1 capabilities authored **by voice**, and extend the capability descriptor with a **Model
+Cabinet**: per-position rules for `primary`, `subagent`, `critic` and `background`.
+
+**The insight that drove it** — and it reframes doc 14 §10: **the decision layer is a rule
+factory, not a rule substitute.** "Which tier for this?" is a judgment while no rule exists, so
+Jev decides and proposes. The moment the user says *"always use Fable 5.1 for coding tasks,"*
+that judgment becomes a deterministic rule and Jev never decides it again. Jev call volume
+falls, determinism rises, cost and latency fall. **It spends its life putting itself out of a
+job.** Every rule records the decision that preceded it and the utterance that authorized it,
+so *"why does it always use Fable for coding?"* answers itself from the Record.
+
+**Position-scoping is a cost primitive.** Subagents multiply: at $10/$50 per M, one Fable turn
+is a considered purchase and eight parallel Fable subagents is a different order of spend, for
+work that is usually narrower than the turn that spawned it. Hence `subagent: deny: [fable-5-1]`
+as a distinct concept from `primary`.
+
+**The hybrid division, precisely** (this is the answer to "Jev in tandem with Jarvis main"):
+**generate with the LLM, validate with Jev, execute with a rule.** A local model parses free
+text into a draft policy — Jev structurally cannot, it writes no free text — Jev then answers
+the bounded question *does this parse match what was said?* `{matches | drifts | ambiguous}`,
+and ambiguity costs one clarifying question. Reusable wherever free text becomes structure:
+skill drafts, watch definitions, Protocol declarations, memory writes.
+
+**Two rules this commits us to.**
+- **Override beats exclusion.** `route.policy.exclude` binds *automatic selection*;
+  `route.pin` — a deliberate human choice — always wins. The user is not a thing the router
+  protects itself from. The single exception is the general rule reasserting itself: an override
+  can never exceed an **autonomy class**. Routing preferences are preferences; policy is policy.
+- **Conflict detection at write time.** Denying Fable at `subagent` while D10 requires a critic
+  from a different provider than the builder can empty the legal critic set. That must surface
+  when the policy is written, never as a silent same-provider fallback at 2am.
+
+**Two behavioural rules the dialogue demonstrated.** Confirm the *exact* change ("I'm wiping
+Fable from the subagents list"), never a vague ack. And **narrate an inferred reason, act only
+on the stated one** — saying "watching our costs is wise" exposes an assumption the user never
+stated so it can be corrected in one word; silently acting on it would be the R7 violation.
+
+---
+
+## D2 — **UPDATE: static audit clean; one measurement from closing**
+**Date:** 2026-09-20 · **Status:** Partially resolved · **Detail:** [`18-PERSONAL-JARVIS-AUDIT.md`](18-PERSONAL-JARVIS-AUDIT.md)
+
+The static half of the audit ran against commit `888df0c` (Apache 2.0, ~330k lines of Python,
+3,934 files, **2,176 test files**, last commit one day prior).
+
+**The criterion that would have disqualified it did not fire.** Generated skills go through a
+**forced draft lifecycle** enforced in code with an audit trail — *"state=draft is ALWAYS
+forced… we note the override in the result"* — and even `promote_to_global()` lands as a draft.
+A model in that system cannot write itself a live capability. Telemetry is local performance
+instrumentation with no analytics phone-home; every outbound host is a provider, an opted-in
+integration, or a docs URL; secrets live in the OS keyring with no plaintext writes found.
+
+**What remains:** per-utterance **wake-to-ack on our hardware**, which needs a VM and a
+microphone and was not measurable in this environment. The shipped `desktop-ttu-latest.json`
+reports median voice-ready ≈ 12.8 s, but that is **cold start from spawn, not wake-to-ack** —
+the two must not be conflated, and for an always-on service the first is largely irrelevant.
+
+**Next step to close:** pinned commit in a VM, test-suite pass rate, and wake → acknowledgement
+over ~50 utterances. Under 1.2 s p95 → adopt as a pinned voice node with skill authoring
+disabled at config and verified by test. Over → design only, as originally planned.
+
+**Adopt regardless of the verdict:** the forced-draft skill lifecycle; the computer-use loop
+`capture → target_guard → actuate → verify → ledger`; and the field datapoint from their
+retention module — **~91k screenshot files / ~38 GB observed without a sweep**, which confirms
+doc 11 §4 (text is free, pixels are the cost) and is exactly the fixed-age policy D9 improves
+on with per-item adjudication.
+
+**One caveat to carry:** `install_agy_jarvis_plugin()` writes `mcp_config.json` into the
+workspace automatically to mount Jarvis' tools into a sub-agent. Workspace-scoped, additive,
+and it does not touch the global config — but it is a privilege-granting write performed as a
+silent side-effect. In our stack that needs an explicit capability with an autonomy class.

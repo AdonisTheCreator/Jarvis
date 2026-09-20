@@ -35,6 +35,8 @@ purpose: the contracts come before the integrations.
 | [14 — The Decision Layer](docs/14-THE-DECISION-LAYER.md) | Jev, adjudicated retention, cross-provider critics |
 | [15 — Session Control](docs/15-SESSION-CONTROL.md) | Phone→desktop dispatch, the coding command centre, voice bridging |
 | [16 — Model Topology](docs/16-MODEL-TOPOLOGY.md) | Why there is no "main Jarvis model" |
+| [17 — Routing Policy](docs/17-ROUTING-POLICY.md) | Spoken policy authorship, the Model Cabinet, and the decision layer as a rule factory |
+| [18 — Personal Jarvis Audit](docs/18-PERSONAL-JARVIS-AUDIT.md) | D2 findings against commit `888df0c` |
 
 Start with **04** if you want the argument, **01** if you want the vision, **02** if you
 want the part nobody has built yet, **09** if you want current state.
@@ -111,6 +113,8 @@ adapter.
 12. **Low confidence escalates to the more thorough path, never the cheaper one.** ([14](docs/14-THE-DECISION-LAYER.md) §3)
 13. **Write the rule when the input is structured and the question is decidable.** Jev is for judgments over messy state — its edge is knowing when it doesn't know. ([14](docs/14-THE-DECISION-LAYER.md) §10)
 14. **Remote awareness before remote control.** A blocked session you hear about beats a session you can drive. ([15](docs/15-SESSION-CONTROL.md) §1)
+15. **Generate with the LLM, validate with Jev, execute with a rule.** Wherever free text becomes structure. ([17](docs/17-ROUTING-POLICY.md) §3)
+16. **Narrate the inferred reason; act only on the stated one.** ([17](docs/17-ROUTING-POLICY.md) §6)
 
 ---
 
@@ -134,6 +138,8 @@ adapter.
 | **D14** Model topology | **No main model.** Five roles — voice front, decision layer, subconscious, reasoning, specialists. Identity lives in the core, not in a vendor. |
 | **D15** Grok Bot | **A worker for authenticated web tasks, later — not a competitor.** It cannot have your Record, your policy, your devices, or the ability to forget. |
 | **D16** God's Eye View | **Adopt as a visual output surface, not a data source.** Use a real weather API for weather. Situational awareness about places, never people. |
+| **D17** Routing policy | **Spoken, persistent, position-scoped.** And the reframe: the decision layer *manufactures* rules from its own decisions — it spends its life putting itself out of a job. |
+| **D2** (update) | **Static audit clean.** Forced-draft skill lifecycle, no phone-home, keyring secrets. One measurement — wake-to-ack on our hardware — from closing. |
 
 Two of these shape the code more than the rest. **D4**: deferring the control-plane choice
 *and* prioritising the learning loop together mean neither memory nor procedural learning can
