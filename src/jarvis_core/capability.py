@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
-from typing import Iterable, Mapping, Sequence
+from typing import Final, Iterable, Mapping, Sequence
 
 from .autonomy import AutonomyClass
 
@@ -103,6 +103,11 @@ class ModelCabinet:
         return problems
 
 
+#: An explicit "this cannot be undone". Distinct from ``None``, which means
+#: nobody has said. Only the first is an answer.
+NO_UNDO: Final[str] = "no-undo"
+
+
 @dataclass(frozen=True, slots=True)
 class Capability:
     """One thing Jarvis can do, and the terms on which it may do it."""
@@ -113,6 +118,8 @@ class Capability:
     privacy: PrivacyClass = PrivacyClass.PERSONAL
     reversible: bool = True
     undo: str | None = None
+    """The compensating capability, or :data:`NO_UNDO`. Required once a
+    capability is both external and irreversible -- see ``__post_init__``."""
     enabled: bool = False
     """Off until explicitly enabled. A1 is 'automatic once enabled', and the
     default must be the safe half of that sentence."""
@@ -126,9 +133,21 @@ class Capability:
 
     def __post_init__(self) -> None:
         if self.autonomy >= AutonomyClass.A2_EXTERNAL and not self.reversible and not self.undo:
-            # Not fatal -- some things genuinely cannot be undone -- but it must
-            # be stated rather than implied, because it drives the approval tier.
-            object.__setattr__(self, "undo", None)
+            # Some things genuinely cannot be undone. That has to be *stated*
+            # rather than left absent: the checkpoint's irreversible bucket and
+            # the text of the approval a human is shown both depend on knowing
+            # the difference between "no undo exists" and "nobody filled this
+            # in". An empty field cannot tell them apart.
+            #
+            # This used to assign undo = None -- which, on the branch where
+            # `not self.undo` already holds, changed nothing at all. The guard
+            # computed a condition and did nothing with it, so every mutation
+            # of it survived the suite.
+            raise ValueError(
+                f"capability {self.name!r} is {self.autonomy.label}, irreversible, "
+                "and declares no undo. Name the compensating capability, or set "
+                "undo=NO_UNDO to say so on the record."
+            )
 
     @property
     def side_effecting(self) -> bool:

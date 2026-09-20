@@ -40,13 +40,6 @@ class FakeBackend(AgentBackend):
         return TaskStatus(handle=handle, state=TaskState.SUCCEEDED)
 
 
-@pytest.fixture
-def router(registry, engine, store):
-    r = CapabilityRouter(registry, engine, store)
-    r.register_backend(FakeBackend("primary", ["ci.read_status", "ci.rerun_job", "message.send"]))
-    return r
-
-
 class TestRouting:
     def test_picks_the_highest_scoring_healthy_backend(self, registry, engine, store):
         router = CapabilityRouter(registry, engine, store)

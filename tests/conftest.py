@@ -6,7 +6,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from jarvis_core.capability import Capability, CapabilityRegistry, PrivacyClass
+from jarvis_core.capability import NO_UNDO, Capability, CapabilityRegistry, PrivacyClass
 from jarvis_core.policy import ApprovalLedger, AutonomyClass as A, PolicyEngine, ProtocolRegistry
 from jarvis_core.record import RecordStore, SubjectKeystore
 
@@ -30,8 +30,10 @@ def registry() -> CapabilityRegistry:
                        idempotency_key_fields=("job_id",)),
             Capability("message.send", A.A2_EXTERNAL, enabled=True,
                        idempotency_key_fields=("to", "body")),
+            # Irreversible and external, so it has to say so: locking the door
+            # again does not un-open it, and the Protocol carries its own undo.
             Capability("door.unlock", A.A3_CONSEQUENTIAL, enabled=True, reversible=False,
-                       privacy=PrivacyClass.SENSITIVE),
+                       undo=NO_UNDO, privacy=PrivacyClass.SENSITIVE),
             Capability("vehicle.drive", A.A4_BLOCKED, enabled=True),
             Capability("ci.read_logs", A.A0_OBSERVE, enabled=False),
         ]
@@ -51,3 +53,13 @@ def protocols(registry: CapabilityRegistry) -> ProtocolRegistry:
 @pytest.fixture
 def engine(registry, approvals, protocols) -> PolicyEngine:
     return PolicyEngine(registry, approvals, protocols)
+
+
+@pytest.fixture
+def router(registry, engine, store):
+    """Shared: more than one module asserts on the router's input guards."""
+    from test_router import CapabilityRouter, FakeBackend
+
+    r = CapabilityRouter(registry, engine, store)
+    r.register_backend(FakeBackend("primary", ["ci.read_status", "ci.rerun_job", "message.send"]))
+    return r

@@ -284,6 +284,10 @@ class CapabilityRouter:
                         "policy": decision.reason,
                         "idempotency_key": key,
                         "reversible": capability.reversible,
+                        # Recorded beside it so the audit trail can tell "no
+                        # undo exists" from "nobody said", which is the whole
+                        # point of declaring it.
+                        "undo": capability.undo,
                     },
                 )
             )
