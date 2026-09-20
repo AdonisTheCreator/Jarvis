@@ -586,6 +586,71 @@ class TestClaimLifecycle:
         kinds = [e.kind for e in AuditProjection(store).trail(session="s1")]
         assert EventKind.CLAIM_HELD in kinds and EventKind.CLAIM_RESOLVED in kinds
 
+    def test_a_concurrently_resolved_claim_is_not_reported_as_ours(
+        self, registry, engine, store
+    ):
+        """Reporting it COMPLETED would leave no DONE row, so the next invoke
+        re-sends an effect the Record claims already completed."""
+        class Slow(FakeBackend):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.router = None
+
+            def status(self, handle):
+                # Someone force-releases while we are asking about status.
+                self.router.force_release(self.router.outstanding_claims()[0])
+                return TaskStatus(handle=handle, state=TaskState.SUCCEEDED)
+
+        router = CapabilityRouter(registry, engine, store)
+        backend = Slow("racy", ["ci.rerun_job"])
+        backend.router = router
+        router.register_backend(backend)
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert result.claim is ClaimOutcome.ALREADY_RESOLVED
+
+    def test_a_held_notice_can_be_matched_to_its_closer(self, registry, engine, store):
+        """Keys hash the action, so attempts share a key; only the generation
+        distinguishes a notice from a later attempt's."""
+        class Pending(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.PENDING)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Pending("queue", ["ci.rerun_job"]))
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        router.resolve(result.claim_token, ClaimOutcome.COMPLETED, "done",
+                       session=result.session, subject_keys=result.subject_keys)
+
+        held = [s.event for s in store.scan(kinds=[EventKind.CLAIM_HELD])][0]
+        resolved = [s.event for s in store.scan(kinds=[EventKind.CLAIM_RESOLVED])][0]
+        assert held.meta["generation"] == resolved.meta["generation"]
+        assert held.meta["idempotency_key"] == resolved.meta["idempotency_key"]
+
+    def test_an_override_lands_in_the_same_trail_as_its_held_notice(
+        self, registry, engine, store
+    ):
+        from jarvis_core.record.projections import AuditProjection
+
+        class Exploding(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                raise RuntimeError("boom")
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Exploding("flaky", ["ci.rerun_job"]))
+        with pytest.raises(RuntimeError):
+            router.invoke(
+                Request("ci.rerun_job", "j", {"job_id": "j"}, session="s1"),
+                Task("ci.rerun_job", "j", {"job_id": "j"}, subject_keys=("project:jarvis",)),
+            )
+        router.force_release(
+            router.outstanding_claims()[0],
+            session="s1", subject_keys=("project:jarvis",),
+        )
+        kinds = [e.kind for e in AuditProjection(store).trail(session="s1")]
+        assert EventKind.CLAIM_HELD in kinds and EventKind.CLAIM_OVERRIDE in kinds
+        override = [s.event for s in store.scan(kinds=[EventKind.CLAIM_OVERRIDE])][0]
+        assert override.subject_keys == ("project:jarvis",)
+
     def test_the_invocation_carries_what_resolve_needs(self, registry, engine, store):
         """A docstring telling callers to read fields off the Invocation is
         only true if the Invocation has them."""

@@ -188,6 +188,11 @@ class Event:
                 f"event {self.id}: subject_keys must be a sequence of strings, "
                 f"not the string {self.subject_keys!r}"
             )
+        if isinstance(self.parent, str):
+            raise TypeError(
+                f"event {self.id}: parent must be a sequence of ids, "
+                f"not the string {self.parent!r}"
+            )
         if not self.subject_keys:
             # Not a style rule: an event with no subject can never be forgotten.
             raise ValueError(

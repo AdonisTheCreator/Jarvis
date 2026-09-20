@@ -67,10 +67,14 @@ class TestEventSchema:
         with pytest.raises(TypeError, match="not the string"):
             make_event(EventKind.USER_TURN, actor=Actor.USER, session="s",
                        subject_keys="project:jarvis")
-        # The constructor guards it too, for callers that bypass make_event.
+        # The constructor guards both sequence params, for callers that
+        # bypass make_event.
         with pytest.raises(TypeError, match="not the string"):
             Event(id=new_ulid(), kind=EventKind.USER_TURN, actor=Actor.USER,
                   session="s", subject_keys="project:jarvis")
+        with pytest.raises(TypeError, match="not the string"):
+            Event(id=new_ulid(), kind=EventKind.USER_TURN, actor=Actor.USER,
+                  session="s", subject_keys=("x",), parent="01ABCDEF")
 
     def test_a_bare_string_parent_is_rejected(self):
         """Same trap: a parent id split into characters would silently produce

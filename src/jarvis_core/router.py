@@ -55,7 +55,7 @@ class ClaimOutcome(StrEnum):
     """What became of a side effect's idempotency claim, as of dispatch.
 
     Deliberately small. An earlier version modelled a full asynchronous
-    settlement protocol -- handle bindings, a polling loop, five states -- for
+    settlement protocol -- handle bindings, a polling loop, seven states -- for
     backends that do not exist yet, against a ledger that is not durable yet.
     Every review round found a new hole in it. The core stays small on purpose
     (docs/04 Rule 3), so the router now reports what it knows and hands the
@@ -70,6 +70,11 @@ class ClaimOutcome(StrEnum):
     HELD = "held"
     """The outcome is not yet known, so the claim is held and the action stays
     blocked. The caller owns the token and resolves it when it finds out."""
+    ALREADY_RESOLVED = "already_resolved"
+    """Someone else resolved it first -- typically a concurrent force_release.
+    Distinct from COMPLETED because the ledger holds no DONE row, so reporting
+    it as ours would let the next invoke re-send an effect the Record claims
+    already completed."""
 
     @property
     def resolved(self) -> bool:
@@ -432,6 +437,7 @@ class CapabilityRouter:
         operator: str = "system",  # same prefixed form as Request.actor
         reason: str = "",
         session: str = "operator",
+        subject_keys: tuple[str, ...] = ("system",),
         caused_by: str | None = None,
     ) -> bool:
         """Free a claim whose token was lost -- an operator escape hatch.
@@ -452,11 +458,15 @@ class CapabilityRouter:
         (``"user:harrison"``, ``"watcher:claim-gc"``), so an automated caller
         is not recorded as a person authorizing a duplicate effect.
 
-        Pass ``session`` and ``caused_by`` (the stranded invoke's event id) so
-        the override lands in the affected session's audit trail and in the
-        causal walk from the invocation it unblocks. Without them the only
-        link is the key in meta.
+        Pass ``session``, ``subject_keys`` and ``caused_by`` (the stranded
+        invoke's event id) so the override lands in the same audit trail as the
+        ``claim.held`` it closes. Without them the only link is the key in meta.
         """
+        if isinstance(subject_keys, str) or not subject_keys:
+            raise ValueError(
+                "subject_keys must be a non-empty sequence of strings, "
+                f"not {subject_keys!r}"
+            )
         claim = self._idempotency.peek(key)
         if claim is None:
             return False
@@ -476,7 +486,7 @@ class CapabilityRouter:
                     actor=_actor_of(operator),
                     actor_id=operator,
                     session=session,
-                    subject_keys=("system",),
+                    subject_keys=subject_keys,
                     parent=[caused_by] if caused_by else (),
                     meta={
                         "idempotency_key": key,
@@ -532,6 +542,10 @@ class CapabilityRouter:
                 meta={
                     "capability": request.capability,
                     "idempotency_key": token.key if token else None,
+                    # Keys hash the action, so attempts share a key. Without
+                    # the generation a held notice cannot be matched to the
+                    # resolved/override that closed it.
+                    "generation": token.generation if token else None,
                     # "never dispatched" and "dispatched, status endpoint down"
                     # both read as unknown state, but need opposite recovery
                     # before an operator force-releases either.
@@ -640,13 +654,15 @@ class CapabilityRouter:
         if state is TaskState.SUCCEEDED:
             # Keep the result reference: DONE means "return what happened
             # before", which is impossible without it.
-            self._idempotency.complete(token, handle.id if handle else None)
+            if not self._idempotency.complete(token, handle.id if handle else None):
+                return ClaimOutcome.ALREADY_RESOLVED
             return ClaimOutcome.COMPLETED
         if state is not None and state.guarantees_no_effect:
             # Only FAILED promises the effect did not happen. A cancelled send
             # the provider already accepted would otherwise free the claim and
             # the retry would send twice.
-            self._idempotency.release(token)
+            if not self._idempotency.release(token):
+                return ClaimOutcome.ALREADY_RESOLVED
             return ClaimOutcome.RELEASED
         return ClaimOutcome.HELD
 

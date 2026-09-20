@@ -707,8 +707,9 @@ stays small.**
   holds the claim. Guessing in either direction sends the message twice or
   never.
 
-**Result:** −106 lines, 4 outcome states instead of 7, 5 ledger methods instead
-of 8, 253 tests.
+**Result:** −106 lines, 5 outcome states instead of 7, 6 ledger methods instead
+of 8. (The suite has since grown to 290 tests through the review rounds that
+followed.)
 
 **The general lesson, worth keeping.** When review findings stop converging and
 start circling one component, the component is usually the problem. The fix is
