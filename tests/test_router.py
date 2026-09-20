@@ -143,7 +143,8 @@ class TestInvokePath:
         errors = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])]
         assert len(errors) == 1
         assert errors[0].meta["effect_uncertain"] is True
-        assert store.verify() == 3
+        # decision + invoke + tool.error + claim.held
+        assert store.verify() == 4
 
     def test_a_failed_call_leaves_the_claim_in_flight(self, registry, engine, store):
         """A stuck claim needs a human; a wrongly released one sends twice."""
@@ -428,6 +429,26 @@ class TestClaimLifecycle:
             from jarvis_core.record.projections import ConsolidateProjection
             assert ConsolidateProjection(fresh).pending().total >= 1, label
 
+    def test_a_dispatch_failure_also_records_the_held_claim(
+        self, registry, engine, store
+    ):
+        """The most common way an action gets stranded -- so it must be
+        enumerable by kind like every other held claim."""
+        class Exploding(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                raise RuntimeError("boom")
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Exploding("flaky", ["ci.rerun_job"]))
+        with pytest.raises(RuntimeError):
+            router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+
+        held = [s.event for s in store.scan(kinds=[EventKind.CLAIM_HELD])]
+        assert len(held) == 1 and held[0].is_permanent
+        assert held[0].meta["idempotency_key"] == router.outstanding_claims()[0]
+        error = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])][0]
+        assert error.meta["claim"] == "held"
+
     def test_a_failed_read_is_never_recorded_as_an_uncertain_effect(
         self, registry, engine, store
     ):
@@ -444,6 +465,8 @@ class TestClaimLifecycle:
         error = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])][0]
         assert error.meta["effect_uncertain"] is False
         assert error.meta["dispatch_failed"] is True
+        # No claim existed, so nothing is held.
+        assert [s.event for s in store.scan(kinds=[EventKind.CLAIM_HELD])] == []
 
     def test_dispatch_failure_is_distinct_from_an_unreadable_status(
         self, registry, engine, store

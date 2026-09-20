@@ -266,9 +266,17 @@ class CapabilityRouter:
                         "effect_uncertain": token is not None,
                         "dispatch_failed": True,
                         "status_unreadable": False,
+                        "claim": (
+                            ClaimOutcome.HELD if token else ClaimOutcome.NOT_APPLICABLE
+                        ).value,
                     },
                 )
             )
+            if token is not None:
+                # The claim is held here too -- and this is the most common way
+                # an action gets stranded, so it must be enumerable by kind
+                # like every other held claim.
+                self._record_claim_held(request, task, event.event.id, token, None)
             raise
 
         state = self._state_of(backend, handle)
@@ -315,21 +323,7 @@ class CapabilityRouter:
         )
 
         if uncertain:
-            self._record.append(
-                make_event(
-                    EventKind.CLAIM_HELD,
-                    actor=Actor.SYSTEM,
-                    session=request.session,
-                    subject_keys=task.subject_keys or ("system",),
-                    parent=[event.event.id],
-                    meta={
-                        "capability": request.capability,
-                        "idempotency_key": token.key if token else None,
-                        "state": state.value if state else "unknown",
-                        "note": "every retry of this action is blocked until resolved",
-                    },
-                )
-            )
+            self._record_claim_held(request, task, event.event.id, token, state)
 
         return Invocation(
             decision=decision,
@@ -441,6 +435,36 @@ class CapabilityRouter:
         return self._idempotency.in_flight()
 
     # -- internals -------------------------------------------------------
+
+    def _record_claim_held(
+        self,
+        request: Request,
+        task: Task,
+        caused_by: str,
+        token: ClaimToken | None,
+        state: TaskState | None,
+    ) -> None:
+        """Note that a side effect's fate is undetermined.
+
+        Its own kind rather than an overloaded ``tool.error``: a queued task is
+        not a failure, but every retry of the action is blocked until someone
+        resolves it, so it has to be visible in the audit trail.
+        """
+        self._record.append(
+            make_event(
+                EventKind.CLAIM_HELD,
+                actor=Actor.SYSTEM,
+                session=request.session,
+                subject_keys=task.subject_keys or ("system",),
+                parent=[caused_by],
+                meta={
+                    "capability": request.capability,
+                    "idempotency_key": token.key if token else None,
+                    "state": state.value if state else "unknown",
+                    "note": "every retry of this action is blocked until resolved",
+                },
+            )
+        )
 
     def _task_for(self, request: Request, task: Task | None) -> Task:
         """Derive the task from the request, or validate a supplied one.

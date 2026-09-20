@@ -75,6 +75,18 @@ class TestEventSchema:
                      EventKind.MEMORY_FORGET, EventKind.KILLSWITCH):
             assert kind in PERMANENT_KINDS
 
+    def test_every_conclusion_kind_is_permanent(self):
+        """Conclusions -- decisions, approvals, forgets, and the claim story --
+        are the tier that must survive losing everything else. A hardcoded list
+        of four would not catch a new one being added to the prunable tier."""
+        conclusions = {
+            k for k in EventKind
+            if k.value.startswith(("policy.", "approval.", "claim.", "memory.write",
+                                   "memory.forget", "skill.approve", "killswitch"))
+        }
+        missing = conclusions - PERMANENT_KINDS
+        assert not missing, f"conclusion kinds in the prunable tier: {sorted(missing)}"
+
 
 class TestCryptoShredding:
     def test_seal_unseal_roundtrip(self, keystore: SubjectKeystore):

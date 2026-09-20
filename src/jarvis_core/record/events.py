@@ -111,6 +111,10 @@ PERMANENT_KINDS: frozenset[EventKind] = frozenset(
         EventKind.MEMORY_FORGET,
         EventKind.SKILL_APPROVE,
         EventKind.KILLSWITCH,
+        # Both halves of the claim story are permanent: a blocked action and
+        # the override that unblocked it. Keeping only the override would leave
+        # the record of *why* it was needed in the prunable tier.
+        EventKind.CLAIM_HELD,
         EventKind.CLAIM_OVERRIDE,
     }
 )
