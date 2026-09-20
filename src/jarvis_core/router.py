@@ -91,6 +91,10 @@ class Invocation:
     handle: TaskHandle | None
     backend_id: str | None
     event_id: str
+    session: str = "default"
+    subject_keys: tuple[str, ...] = ("system",)
+    """Where this invocation was recorded. Passed back to :meth:`resolve` so
+    the closing event lands in the same audit trail as its ``claim.held``."""
     claim_token: ClaimToken | None = None
     """Held by the caller. Required to resolve a ``HELD`` claim later, and what
     stops a late resolution from an abandoned attempt settling a newer one."""
@@ -331,6 +335,8 @@ class CapabilityRouter:
 
         return Invocation(
             decision=decision,
+            session=request.session,
+            subject_keys=task.subject_keys or ("system",),
             handle=handle,
             backend_id=backend.id,
             event_id=event.event.id,
@@ -354,16 +360,28 @@ class CapabilityRouter:
         an abandoned attempt cannot settle a newer one that shares the key.
         Returns False when the token has been superseded.
 
-        Pass ``session``, ``subject_keys`` and ``caused_by`` from the original
-        :class:`Invocation`, so the resolution lands in the same session's
-        audit trail as the ``claim.held`` it closes. Left at their defaults the
-        held notice still reads as stranded in that session's trail, which is
-        the thing this event exists to prevent.
+        Pass the originating :class:`Invocation`'s ``session``,
+        ``subject_keys`` and ``event_id`` so the resolution lands in the same
+        audit trail as the ``claim.held`` it closes::
+
+            router.resolve(
+                inv.claim_token, ClaimOutcome.COMPLETED, result_ref,
+                session=inv.session, subject_keys=inv.subject_keys,
+                caused_by=inv.event_id,
+            )
+
+        Left at their defaults the held notice still reads as stranded in that
+        session's trail, which is the thing this event exists to prevent.
 
         Use ``RELEASED`` only when the side effect provably did not happen: a
         wrongly released claim sends the message twice, while a claim left held
         merely needs a human.
         """
+        if not subject_keys:
+            # Validated before the ledger is touched. make_event would reject
+            # it afterwards, leaving a settled claim that no path can close.
+            raise ValueError("subject_keys must not be empty")
+
         if outcome is ClaimOutcome.COMPLETED:
             applied = self._idempotency.complete(token, result_ref)
         elif outcome is ClaimOutcome.RELEASED:

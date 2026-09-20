@@ -558,7 +558,8 @@ class TestClaimLifecycle:
 
         router.resolve(
             result.claim_token, ClaimOutcome.COMPLETED, "done",
-            session="s1", subject_keys=("system",), caused_by=result.event_id,
+            session=result.session, subject_keys=result.subject_keys,
+            caused_by=result.event_id,
         )
         resolved = [s.event for s in store.scan(kinds=[EventKind.CLAIM_RESOLVED])]
         assert len(resolved) == 1 and resolved[0].is_permanent
@@ -584,6 +585,46 @@ class TestClaimLifecycle:
         )
         kinds = [e.kind for e in AuditProjection(store).trail(session="s1")]
         assert EventKind.CLAIM_HELD in kinds and EventKind.CLAIM_RESOLVED in kinds
+
+    def test_the_invocation_carries_what_resolve_needs(self, registry, engine, store):
+        """A docstring telling callers to read fields off the Invocation is
+        only true if the Invocation has them."""
+        class Pending(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.PENDING)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Pending("queue", ["ci.rerun_job"]))
+        result = router.invoke(
+            Request("ci.rerun_job", "j", {"job_id": "j"}, session="s1"),
+            Task("ci.rerun_job", "j", {"job_id": "j"}, subject_keys=("project:jarvis",)),
+        )
+        assert result.session == "s1"
+        assert result.subject_keys == ("project:jarvis",)
+
+        router.resolve(
+            result.claim_token, ClaimOutcome.COMPLETED, "done",
+            session=result.session, subject_keys=result.subject_keys,
+            caused_by=result.event_id,
+        )
+        resolved = [s.event for s in store.scan(kinds=[EventKind.CLAIM_RESOLVED])][0]
+        assert resolved.session == "s1"
+        assert resolved.subject_keys == ("project:jarvis",)
+
+    def test_resolve_validates_before_touching_the_ledger(self, registry, engine, store):
+        """An invalid argument must not settle a claim no path can then close."""
+        class Pending(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.PENDING)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Pending("queue", ["ci.rerun_job"]))
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        with pytest.raises(ValueError, match="subject_keys"):
+            router.resolve(result.claim_token, ClaimOutcome.COMPLETED, subject_keys=())
+        # Still held, and still resolvable.
+        assert router.outstanding_claims() == [result.idempotency_key]
+        assert router.resolve(result.claim_token, ClaimOutcome.COMPLETED) is True
 
     def test_a_refused_resolution_records_nothing(self, registry, engine, store):
         class Failing(FakeBackend):
