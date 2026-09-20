@@ -73,13 +73,32 @@ class TestResolution:
         assert (result.chosen, result.source) == ("middle", DecisionSource.FALLBACK)
 
     def test_a_crashing_decider_falls_back_rather_than_taking_the_system_down(self):
+        """Same choice as an absent decider, different source: 'the decision
+        layer is down' and 'the decision layer is erroring' want different
+        responses, and one source hides the second behind the first."""
         result = registry_with(StubDecider("cheap", 0.9, boom=True)).decide("test.point", {})
-        assert (result.chosen, result.source) == ("middle", DecisionSource.FALLBACK)
+        assert (result.chosen, result.source) == ("middle", DecisionSource.FAULT)
 
-    def test_answer_outside_the_option_set_is_rejected(self):
-        """A decider that invents an option is broken, not creative."""
+    def test_an_answer_outside_the_option_set_escalates_rather_than_falls_back(self):
+        """A decider that invents an option is broken, not creative -- and more
+        broken than one that is merely unsure, so it must not get the milder
+        treatment. It used to: on record.retention the fallback is "compress"
+        where low confidence says "keep_full", so a broken decider destroyed
+        detail an unsure one would have kept."""
         result = registry_with(StubDecider("invented", 0.99)).decide("test.point", {})
-        assert (result.chosen, result.source) == ("middle", DecisionSource.FALLBACK)
+        assert (result.chosen, result.source) == ("careful", DecisionSource.INVALID)
+        assert result.chosen == registry_with().get("test.point").escalate_to
+
+    def test_the_three_degraded_paths_are_told_apart(self):
+        """Absent, erroring, and answering nonsense are three different alarms."""
+        sources = {
+            registry_with(StubDecider("cheap", 0.9, up=False)).decide("test.point", {}).source,
+            registry_with(StubDecider("cheap", 0.9, boom=True)).decide("test.point", {}).source,
+            registry_with(StubDecider("invented", 0.99)).decide("test.point", {}).source,
+        }
+        assert sources == {
+            DecisionSource.FALLBACK, DecisionSource.FAULT, DecisionSource.INVALID,
+        }
 
     def test_safety_critical_points_deny_when_unavailable(self):
         reg = DecisionRegistry(StubDecider("a", 0.9, up=False))
@@ -98,26 +117,39 @@ class TestRuleFactory:
 
     def test_a_promoted_rule_short_circuits_the_model(self):
         reg = registry_with(StubDecider("cheap", 0.99))
-        reg.promote_to_rule("test.point", "careful")
+        reg.promote_to_rule("test.point", "careful", actor="user:harrison")
         result = reg.decide("test.point", {})
         assert (result.chosen, result.source, result.confidence) == (
             "careful", DecisionSource.RULE, 1.0,
         )
 
-    def test_rules_are_enumerable(self):
+    def test_rules_are_enumerable_and_attributed(self):
+        """A rule outranks the decision layer permanently and answers with
+        confidence 1.0. {point: chosen} cannot say who settled it."""
         reg = registry_with()
-        reg.promote_to_rule("test.point", "cheap")
-        assert dict(reg.rules()) == {"test.point": "cheap"}
+        reg.promote_to_rule("test.point", "cheap", actor="user:harrison", note="spoken")
+        rule = reg.rules()["test.point"]
+        assert (rule.chosen, rule.actor, rule.note) == ("cheap", "user:harrison", "spoken")
+        assert rule.at > 0
 
-    def test_a_rule_can_be_cleared(self):
+    def test_an_anonymous_rule_is_refused(self):
+        for blank in ("", "   "):
+            with pytest.raises(ValueError, match="needs an actor"):
+                registry_with().promote_to_rule("test.point", "cheap", actor=blank)
+
+    def test_a_rule_can_be_cleared_and_the_lift_is_attributable_too(self):
+        """Removing a policy is a policy write; the Record needs the same
+        detail for the undo as for the promotion."""
         reg = registry_with(StubDecider("cheap", 0.95))
-        reg.promote_to_rule("test.point", "careful")
-        assert reg.clear_rule("test.point") is True
+        reg.promote_to_rule("test.point", "careful", actor="user:harrison")
+        lifted = reg.clear_rule("test.point")
+        assert (lifted.chosen, lifted.actor) == ("careful", "user:harrison")
+        assert reg.clear_rule("test.point") is None
         assert reg.decide("test.point", {}).source is DecisionSource.MODEL
 
     def test_cannot_promote_to_a_non_option(self):
         with pytest.raises(ValueError, match="not an option"):
-            registry_with().promote_to_rule("test.point", "invented")
+            registry_with().promote_to_rule("test.point", "invented", actor="user")
 
 
 class TestStandardCatalog:

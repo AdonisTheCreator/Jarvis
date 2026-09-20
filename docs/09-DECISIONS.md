@@ -718,3 +718,51 @@ one fact.
 **The general lesson, worth keeping.** When review findings stop converging and
 start circling one component, the component is usually the problem. The fix is
 not a better patch — it is asking what the thing was actually required to do.
+
+---
+
+## D20 — **A guard that cannot fail is not a guard: mutation-test every one**
+**Date:** 2026-09-20 · **Status:** Decided · **Code:** `killswitch.py`, `memory.py`,
+`record/redact.py`, `record/projections.py`, `decide/registry.py`
+
+**Decision.** Every check whose job is to catch a failure must be verified by
+*causing* that failure and watching the check go red. A guard that has never
+been seen to fail is documentation, and the test that covers it is a second
+piece of documentation agreeing with the first.
+
+**Why, stated plainly.** Review rounds 25–27 found six of them, all in code
+that read as careful and all of it mine. In each case a test passed, a
+docstring made a confident claim, and the claim was false:
+
+| Guard | What it claimed | What it did |
+|---|---|---|
+| `FileKillSwitch` | Fails closed on a missing mount or an unreadable sentinel | `Path.exists()` swallows ENOENT, ENOTDIR, ELOOP and EBADF, so the fail-closed branch was unreachable for exactly those faults. A detached mount read as *not engaged*. The test that "covered" it raised a synthetic `OSError` the real API never raises. |
+| `CanonicalMemory.leaks()` | Detects a broken forget fan-out | Looked only at `subject_keys` — the set `forget` removes *directly*. Deleting the entire traversal left it reporting all clear. |
+| `CORE_OWNED` | The memory-ownership boundary (docs/05 §4) | Defined, documented, referenced by nothing. |
+| `redact_bytes` | A credential never enters the Record | Any payload that was not valid UTF-8 was waved through untouched, with an empty report that reads in the audit projection as *we looked and it was clean*. |
+| `RecallScope` | Recall is a capability with an autonomy class, not an ambient ability | A plain argument the caller chose for itself, on what the same docstring calls the highest-value exfiltration target in the system. |
+| `DecisionRegistry.decide` | An out-of-option answer is rejected | Rejected it to the **fallback**, which for `record.retention` is `compress` where low confidence says `keep_full` — so a decider emitting nonsense destroyed detail an unsure one would have kept. Broken got the milder treatment than unsure. |
+
+**The shape they share.** Every one of them fails in the *safe-looking*
+direction: absent, empty, clean, allowed, cheaper. That is not a coincidence.
+A guard is written while thinking about the dangerous path, and the benign
+default is whatever the language does when nothing happens. So the untested
+branch is always the one that matters, and it always looks fine in green CI.
+
+**What it commits us to.** For each guard: write the mutation, run it, confirm
+the matching test — not merely *a* test — goes red, then revert. All six fixes
+here carry one. Two of them turned nothing red at all before the fix, which is
+the entire point of the exercise.
+
+**What reverses it.** Nothing about the principle. The *mechanism* is worth
+revisiting: these were run by hand and are not repeatable. If the count of
+guards keeps rising, a mutation-testing harness (`mutmut`, `cosmic-ray`) over
+`src/jarvis_core/` earns its keep — with the caveat that a general mutation
+tool scores *lines*, and what matters here is whether the right test failed.
+
+**Relation to D19.** D19 said: when findings circle one component, the
+component is the problem. D20 is the other half: when findings stop appearing,
+check whether that is convergence or whether the checks have simply stopped
+looking. Rounds 20–24 all landed in one subsystem (D19's lesson); rounds 25–27
+found six defects in modules that had produced none, because this was the first
+pass that tried to *break* them rather than read them.

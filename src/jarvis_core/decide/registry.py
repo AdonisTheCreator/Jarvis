@@ -10,7 +10,10 @@ import time
 from typing import Any, Mapping, Sequence
 
 from ..errors import PolicyDenied
-from .types import Decider, DecisionPoint, DecisionResult, DecisionSource, FallbackDecider
+from .types import (
+    Decider, DecisionPoint, DecisionResult, DecisionSource, FallbackDecider,
+    PromotedRule,
+)
 
 
 class DecisionRegistry:
@@ -19,7 +22,7 @@ class DecisionRegistry:
     def __init__(self, decider: Decider | None = None) -> None:
         self._points: dict[str, DecisionPoint] = {}
         self._decider: Decider = decider or FallbackDecider()
-        self._forced_rules: dict[str, str] = {}
+        self._forced_rules: dict[str, PromotedRule] = {}
 
     # -- registration ----------------------------------------------------
 
@@ -44,22 +47,35 @@ class DecisionRegistry:
 
     # -- the rule factory (docs/17 §2) -----------------------------------
 
-    def promote_to_rule(self, point_id: str, chosen: str) -> None:
+    def promote_to_rule(
+        self, point_id: str, chosen: str, *, actor: str, note: str = ""
+    ) -> PromotedRule:
         """Freeze a decision as a deterministic rule.
 
         This is the mechanism behind "always use Fable 5.1 for coding tasks":
         once a human settles the judgment, the decision layer stops being
         asked. Call volume falls, determinism rises, cost falls.
+
+        ``actor`` is required. This write outranks the decision layer
+        permanently and answers with confidence 1.0, so an anonymous one is
+        the least auditable and most powerful thing in the plane. The returned
+        rule is what the caller appends to the Record as a POLICY_WRITE.
         """
         point = self._require(point_id)
         if chosen not in point.options:
             raise ValueError(f"{chosen!r} is not an option of {point_id!r}")
-        self._forced_rules[point_id] = chosen
+        rule = PromotedRule(
+            point_id=point_id, chosen=chosen, actor=actor, note=note, at=time.time()
+        )
+        self._forced_rules[point_id] = rule
+        return rule
 
-    def clear_rule(self, point_id: str) -> bool:
-        return self._forced_rules.pop(point_id, None) is not None
+    def clear_rule(self, point_id: str) -> PromotedRule | None:
+        """Unsettle a judgment. Returns the rule that was lifted, for the
+        Record -- removing a policy is a policy write too."""
+        return self._forced_rules.pop(point_id, None)
 
-    def rules(self) -> Mapping[str, str]:
+    def rules(self) -> Mapping[str, PromotedRule]:
         """Every judgment that has been settled. Enumerable on demand (R3)."""
         return dict(self._forced_rules)
 
@@ -71,7 +87,7 @@ class DecisionRegistry:
         # A promoted rule short-circuits everything, including the model.
         forced = self._forced_rules.get(point_id)
         if forced is not None:
-            return DecisionResult(point.id, forced, 1.0, DecisionSource.RULE)
+            return DecisionResult(point.id, forced.chosen, 1.0, DecisionSource.RULE)
 
         if not self._decider.available():
             if point.safety_critical:
@@ -87,12 +103,19 @@ class DecisionRegistry:
         except Exception:  # noqa: BLE001 -- a decider fault must not take the system down
             if point.safety_critical:
                 raise PolicyDenied(point.id, "decision layer failed on a safety-critical point")
-            return DecisionResult(point.id, point.fallback, 0.0, DecisionSource.FALLBACK)
+            return DecisionResult(point.id, point.fallback, 0.0, DecisionSource.FAULT)
         latency_ms = (time.perf_counter() - started) * 1000
 
         if chosen not in point.options:
-            # A decider that answers outside the option set is broken, not creative.
-            return DecisionResult(point.id, point.fallback, 0.0, DecisionSource.FALLBACK, latency_ms)
+            # A decider that answers outside the option set is broken, not
+            # creative -- and more broken than one that is merely unsure, so it
+            # escalates rather than falling back. Falling back handed it the
+            # *milder* of the two treatments: on record.retention that is
+            # "compress" where low confidence would have said "keep_full", so a
+            # broken decider quietly destroyed detail the unsure one preserved.
+            return DecisionResult(
+                point.id, point.escalate_to, 0.0, DecisionSource.INVALID, latency_ms
+            )
 
         if confidence < point.min_confidence:
             # Escalate to the MORE conservative option, never the cheaper one.

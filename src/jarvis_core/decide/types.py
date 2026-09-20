@@ -25,6 +25,17 @@ from typing import Any, Mapping, Protocol, Sequence
 class DecisionSource(StrEnum):
     MODEL = "model"
     FALLBACK = "fallback"
+    """No decider was available, so the point's own fallback applied."""
+    FAULT = "fault"
+    """A decider was available and raised. Same fallback, different alarm:
+    'the decision layer is down' and 'the decision layer is erroring' need
+    different responses, and collapsing them hides the second behind the
+    first."""
+    INVALID = "invalid"
+    """A decider answered outside the point's option set. Escalates rather
+    than falling back -- a decider inventing options is more broken than one
+    that is merely unsure, so it must not get the milder of the two
+    treatments."""
     ESCALATED = "escalated"
     RULE = "rule"
     """A point that has been *promoted to a rule* (docs/17 §2) -- the decision
@@ -65,6 +76,30 @@ class DecisionPoint:
             )
         if not 0.0 < self.min_confidence <= 1.0:
             raise ValueError(f"decision point {self.id!r}: min_confidence must be in (0, 1]")
+
+
+@dataclass(frozen=True, slots=True)
+class PromotedRule:
+    """A judgment a human settled, with who settled it and when.
+
+    The rule short-circuits the decision layer permanently and answers with
+    confidence 1.0, which makes it the highest-leverage write in the decision
+    plane. ``{point_id: chosen}`` alone cannot answer "who decided this"; the
+    Record has a POLICY_WRITE kind waiting for exactly this (docs/17 §2, R3).
+    """
+
+    point_id: str
+    chosen: str
+    actor: str
+    note: str = ""
+    at: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.actor.strip():
+            raise ValueError(
+                "a promoted rule needs an actor; an unattributable policy write "
+                "is not auditable, and this one outranks the decision layer"
+            )
 
 
 @dataclass(frozen=True, slots=True)

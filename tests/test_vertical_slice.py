@@ -78,19 +78,22 @@ def test_spoken_routing_policy_round_trip(store: RecordStore):
     assert written.event.is_permanent
 
     # 6. The judgment is now a rule. The model is no longer asked.
-    decisions.promote_to_rule("routing.tier_adequacy", "upgrade")
+    rule = decisions.promote_to_rule(
+        "routing.tier_adequacy", "upgrade", actor="user:harrison", note=utterance
+    )
     before = len(decider.calls)
     again = decisions.decide("routing.tier_adequacy", {"task": "coding.repository"})
     assert (again.chosen, again.source) == ("upgrade", DecisionSource.RULE)
     assert len(decider.calls) == before, "a promoted rule must not call the decider"
 
     # 7. Enumerable, and the exclusion holds for automatic selection only.
-    assert dict(decisions.rules()) == {"routing.tier_adequacy": "upgrade"}
+    assert decisions.rules() == {"routing.tier_adequacy": rule}
+    assert rule.actor == "user:harrison"   # the POLICY_WRITE has an author
     assert cabinet.permits(ModelPosition.SUBAGENT, "fable-5-1") is False
     assert cabinet.permits(ModelPosition.SUBAGENT, "fable-5-1", manual=True) is True
 
     # 8. Spoken undo, and the Record still verifies.
-    assert decisions.clear_rule("routing.tier_adequacy") is True
+    assert decisions.clear_rule("routing.tier_adequacy") == rule
     assert dict(decisions.rules()) == {}
     assert store.verify() == 2
 
