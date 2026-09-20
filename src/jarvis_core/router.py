@@ -269,17 +269,14 @@ class CapabilityRouter:
 
         state = self._state_of(backend, handle)
         outcome = self._resolve_at_dispatch(token, state, handle)
-        # Uncertain means: the claim is held because we cannot say the effect
-        # did or did not land. ``state is None`` (status() raised) and every
-        # terminal state that makes no no-effect promise qualify. Recording
-        # CANCELLED as certain while the ledger holds its claim would make the
-        # Record contradict the ledger, and an operator trusting it would
-        # force_release and send twice.
-        uncertain = state is None or (
-            state.terminal
-            and state is not TaskState.SUCCEEDED
-            and not state.guarantees_no_effect
-        )
+        # Uncertainty is derived from the claim outcome rather than computed
+        # separately, so the Record and the ledger cannot disagree. A HELD
+        # claim means exactly "we cannot say whether the effect landed" --
+        # whether because the task is still running, was interrupted, was
+        # cancelled after the provider may have accepted it, or because
+        # status() raised. An operator reading a held claim as certain would
+        # force_release it and the action would run twice.
+        uncertain = outcome is ClaimOutcome.HELD
         failed = uncertain or state is TaskState.FAILED
         self._record.append(
             make_event(
@@ -332,7 +329,15 @@ class CapabilityRouter:
             return self._idempotency.release(token)
         raise ValueError(f"cannot resolve a claim as {outcome.value!r}")
 
-    def force_release(self, key: str, *, operator: str = "user", reason: str = "") -> bool:
+    def force_release(
+        self,
+        key: str,
+        *,
+        operator: str = "user",
+        reason: str = "",
+        session: str = "operator",
+        caused_by: str | None = None,
+    ) -> bool:
         """Free a claim whose token was lost -- an operator escape hatch.
 
         A token normally dies with the exception that stranded its claim, and
@@ -346,28 +351,36 @@ class CapabilityRouter:
         recorded as a permanent ``claim.override`` event for exactly that
         reason -- it is the one operation that can deliberately cause a
         duplicate effect, so it must never be invisible.
+
+        Pass ``session`` and ``caused_by`` (the stranded invoke's event id) so
+        the override lands in the affected session's audit trail and in the
+        causal walk from the invocation it unblocks. Without them the only
+        link is the key in meta.
         """
         claim = self._idempotency.peek(key)
         if claim is None:
             return False
-        released = self._idempotency.release(claim.token)
-        if released:
-            self._record.append(
-                make_event(
-                    EventKind.CLAIM_OVERRIDE,
-                    actor=Actor.USER,
-                    actor_id=operator,
-                    session="operator",
-                    subject_keys=("system",),
-                    meta={
-                        "idempotency_key": key,
-                        "generation": claim.generation,
-                        "reason": reason,
-                        "note": "a released claim permits the action to run again",
-                    },
-                )
+        # Record *before* releasing. If the append fails the claim survives,
+        # which is the safe direction: an unrecorded override that already
+        # freed the claim looks to the caller like it failed while the action
+        # is now unblocked.
+        self._record.append(
+            make_event(
+                EventKind.CLAIM_OVERRIDE,
+                actor=_actor_of(operator),
+                actor_id=operator,
+                session=session,
+                subject_keys=("system",),
+                parent=[caused_by] if caused_by else (),
+                meta={
+                    "idempotency_key": key,
+                    "generation": claim.generation,
+                    "reason": reason,
+                    "note": "a released claim permits the action to run again",
+                },
             )
-        return released
+        )
+        return self._idempotency.release(claim.token)
 
     def outstanding_claims(self) -> list[str]:
         """Idempotency keys held but unresolved.

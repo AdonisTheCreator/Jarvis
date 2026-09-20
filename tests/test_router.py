@@ -332,8 +332,12 @@ class TestClaimLifecycle:
         with pytest.raises(RuntimeError):
             router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
 
+        invoke_event = [s.event for s in store.scan(kinds=[EventKind.CAPABILITY_INVOKE])][0]
         key = router.outstanding_claims()[0]
-        assert router.force_release(key, operator="harrison", reason="verified not sent")
+        assert router.force_release(
+            key, operator="harrison", reason="verified not sent",
+            session="s1", caused_by=invoke_event.id,
+        )
 
         overrides = [s.event for s in store.scan(kinds=[EventKind.CLAIM_OVERRIDE])]
         assert len(overrides) == 1
@@ -341,6 +345,44 @@ class TestClaimLifecycle:
         assert overrides[0].meta["reason"] == "verified not sent"
         assert overrides[0].actor_id == "harrison"
         assert EventKind.CLAIM_OVERRIDE in [e.kind for e in AuditProjection(store).trail()]
+        # Reachable from the affected session and from the invocation it unblocks.
+        assert EventKind.CLAIM_OVERRIDE in [
+            e.kind for e in AuditProjection(store).trail(session="s1")
+        ]
+        assert overrides[0].id in {e.id for e in AuditProjection(store).why(overrides[0].id)}
+        assert invoke_event.id in {e.id for e in AuditProjection(store).why(overrides[0].id)}
+
+    def test_an_automated_override_is_not_attributed_to_a_human(
+        self, registry, engine, store
+    ):
+        """The exact mis-attribution _actor_of exists to prevent."""
+        class Exploding(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                raise RuntimeError("boom")
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Exploding("flaky", ["ci.rerun_job"]))
+        with pytest.raises(RuntimeError):
+            router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        router.force_release(router.outstanding_claims()[0], operator="watcher:claim-gc")
+        override = [s.event for s in store.scan(kinds=[EventKind.CLAIM_OVERRIDE])][0]
+        assert override.actor is Actor.WATCHER
+
+    def test_a_held_claim_is_always_recorded_as_uncertain(self, registry, engine, store):
+        """Whatever the reason it is held, the Record must agree with the ledger."""
+        for state in (TaskState.PENDING, TaskState.RUNNING, TaskState.AWAITING_APPROVAL,
+                      TaskState.CANCELLED, TaskState.INTERRUPTED):
+            class Held(FakeBackend):
+                def status(self, handle, _s=state):
+                    return TaskStatus(handle=handle, state=_s)
+
+            fresh_store = RecordStore(store.root / f"r-{state.value}", store._keystore)
+            router = CapabilityRouter(registry, engine, fresh_store)
+            router.register_backend(Held("held", ["ci.rerun_job"]))
+            result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+            assert result.claim is ClaimOutcome.HELD
+            events = [s.event for s in fresh_store.scan(kinds=[EventKind.TOOL_ERROR])]
+            assert events[-1].meta["effect_uncertain"] is True, state
 
     def test_a_failed_override_records_nothing(self, router, store: RecordStore):
         assert router.force_release("no-such-key") is False
