@@ -662,3 +662,54 @@ nothing checks decays silently; this one cannot.
 Durable idempotency (in-memory is honest about its scope), a real Jev adapter
 (waitlist), vector/FTS indexes for Recall, and the Hermes adapter. All are
 Phase 0.5+ and none require changing a Phase 0 contract.
+
+---
+
+## D19 — **Delete the async settlement protocol rather than fix it**
+**Date:** 2026-09-20 · **Status:** Decided · **Code:** `router.py`, `idempotency.py`
+
+**Decision.** Remove the asynchronous claim-settlement machinery from the router
+— handle bindings, the poll-until-resolved loop, and the seven-state outcome —
+and replace it with a **caller-held claim token**. The router resolves what it
+can see at dispatch (`COMPLETED`, `RELEASED`) and otherwise reports `HELD`,
+handing back a token the caller uses to resolve it once it actually knows.
+
+**Why, stated plainly.** Six review rounds produced 29 findings. Round one was
+spread across the codebase; **rounds two through six were all in this one
+subsystem**, and each fix created the next hole:
+
+| Round | Fix | What it caused |
+|---|---|---|
+| 2 | Settle from the handle's echoed key | Adapters aren't required to echo it → claims stranded |
+| 3 | Router keeps an in-process handle→key map | Not durable; stale handles settled live retries |
+| 4 | Move the map into the ledger | Handle-id collisions across backends |
+| 5 | Add generations to guard stale resolution | The guard was **inert** — nothing carried the generation |
+
+The round-five guard reading the *live* generation instead of the attempt's own
+was the tell. I wasn't fixing a bug; I was maintaining a protocol that had no
+business existing yet.
+
+**What was actually required.** `docs/06` Phase 0 asks for *exactly-once side
+effects*. It does not ask for an async settlement protocol — and there is no
+async backend, no durable ledger, and nothing to verify it against. This was
+speculative complexity, which `docs/04` Rule 3 exists to prevent: **the core
+stays small.**
+
+**What the token fixes structurally**, rather than by patch:
+- The token carries its own generation, so a late resolution from an abandoned
+  attempt cannot settle a newer one sharing the key. (Keys hash the *action*,
+  so every retry shares its predecessor's key — this is the central hazard.)
+- No handle bindings, so no collisions, no staleness, no durability gap.
+- `HELD` means one thing: *not knowable yet, so the action stays blocked*. The
+  earlier `PENDING`/`STUCK`/`UNKNOWN`/`ALREADY_RESOLVED` split existed to
+  paper over ambiguities the bindings created.
+- Anything unclear — pending, interrupted, or a `status()` call that raised —
+  holds the claim. Guessing in either direction sends the message twice or
+  never.
+
+**Result:** −106 lines, 4 outcome states instead of 7, 5 ledger methods instead
+of 8, 253 tests.
+
+**The general lesson, worth keeping.** When review findings stop converging and
+start circling one component, the component is usually the problem. The fix is
+not a better patch — it is asking what the thing was actually required to do.

@@ -184,41 +184,6 @@ class TestReviewFindings:
         with pytest.raises(TaskMismatch):
             router.invoke(Request("ci.read_status", "repo"), Task("ci.read_status", "other"))
 
-    def test_a_queued_task_is_not_recorded_as_done(self, registry, engine, store):
-        """A pending effect that later fails must stay retryable."""
-        class Queueing(FakeBackend):
-            def status(self, handle):
-                return TaskStatus(handle=handle, state=TaskState.PENDING)
-
-        router = CapabilityRouter(registry, engine, store)
-        router.register_backend(Queueing("queue", ["ci.rerun_job"]))
-        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert result.claim is ClaimOutcome.PENDING and result.settled is False
-
-    def test_a_failed_async_task_releases_the_claim_for_a_real_retry(self, registry, engine, store):
-        class Failing(FakeBackend):
-            def status(self, handle):
-                return TaskStatus(handle=handle, state=TaskState.FAILED)
-
-        router = CapabilityRouter(registry, engine, store)
-        router.register_backend(Failing("flaky", ["ci.rerun_job"]))
-        request = Request("ci.rerun_job", "j", {"job_id": "j"})
-        assert router.invoke(request).claim is ClaimOutcome.RELEASED
-        assert router.invoke(request).handle is not None  # retry permitted
-
-    @pytest.mark.parametrize(
-        "actor,expected",
-        [("user", Actor.USER), ("agent", Actor.AGENT), ("watcher:ci", Actor.WATCHER),
-         ("subconscious", Actor.SUBCONSCIOUS), ("system", Actor.SYSTEM)],
-    )
-    def test_actors_are_not_all_attributed_to_the_human(self, router, store, actor, expected):
-        """Attributing unattended work to the user is the one mistake an audit
-        trail must never make."""
-        router.invoke(Request("ci.read_status", "repo", actor=actor))
-        invokes = [s.event for s in store.scan(kinds=[EventKind.CAPABILITY_INVOKE])]
-        assert invokes[-1].actor is expected
-        assert invokes[-1].actor_id == actor
-
     def test_refusals_leave_a_trail(self, router, store: RecordStore):
         """A quarantined agent probing every capability must be visible."""
         for capability in ("ci.read_status", "ci.rerun_job", "message.send"):
@@ -265,8 +230,14 @@ class TestReviewFindings:
         assert EventKind.TOOL_ERROR in kinds
 
 
-class TestSecondReviewFindings:
-    """Regression coverage for the second review round."""
+class TestClaimLifecycle:
+    """Exactly-once, and what happens when the outcome is not yet knowable.
+
+    The router resolves what it can see at dispatch and hands the caller a
+    token for the rest. An earlier version modelled a full asynchronous
+    settlement protocol for backends that do not exist yet; it was removed
+    (docs/09 D19) rather than patched further.
+    """
 
     def test_task_params_cannot_differ_from_the_authorized_request(self, router):
         """The approval is fingerprinted over request.params; a task carrying
@@ -283,97 +254,112 @@ class TestSecondReviewFindings:
                                Task("ci.rerun_job", "j", params))
         assert result.handle is not None
 
-    def test_settle_works_even_when_the_adapter_echoes_nothing(self, registry, engine, store):
-        """The router took the claim, so it is the authority on whether a
-        handle has one -- not the adapter."""
-        class Bare(FakeBackend):
-            def execute(self, task, idempotency_key=None):
-                self.executions.append((task, idempotency_key))
-                return TaskHandle(id=new_ulid(), backend_id=self.id)  # no key echoed
-
-            def status(self, handle):
-                return TaskStatus(handle=handle, state=TaskState.PENDING)
-
-        router = CapabilityRouter(registry, engine, store)
-        backend = Bare("bare", ["ci.rerun_job"])
-        router.register_backend(backend)
+    def test_a_clear_success_completes_the_claim(self, router):
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert result.claim is ClaimOutcome.PENDING
-        assert router.settle(result, backend) is ClaimOutcome.PENDING
-        assert result.idempotency_key in router.outstanding_claims()
+        assert result.claim is ClaimOutcome.COMPLETED
+        assert router._idempotency.claim(result.idempotency_key).result_ref == result.handle.id
 
-    def test_settle_is_a_no_op_for_read_only_work(self, router):
-        """A generic poll loop must not crash on the first read-only handle."""
-        result = router.invoke(Request("ci.read_status", "repo"))
-        backend = next(b for b in router._backends if b.id == "primary")
-        assert router.settle(result, backend) is ClaimOutcome.NOT_APPLICABLE
-
-    def test_settle_refuses_the_wrong_backend(self, registry, engine, store):
-        router = CapabilityRouter(registry, engine, store)
-        a = FakeBackend("alpha", ["ci.rerun_job"])
-        b = FakeBackend("beta", ["ci.rerun_job"])
-        router.register_backend(a)
-        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        with pytest.raises(ValueError, match="wrong backend"):
-            router.settle(result, b)
-
-    def test_interrupted_is_terminal_so_polling_terminates(self, registry, engine, store):
-        class Interrupted(FakeBackend):
-            def status(self, handle):
-                return TaskStatus(handle=handle, state=TaskState.INTERRUPTED)
-
-        router = CapabilityRouter(registry, engine, store)
-        backend = Interrupted("stopped", ["ci.rerun_job"])
-        router.register_backend(backend)
-        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert result.claim is ClaimOutcome.STUCK and result.settled is True
-        assert result.idempotency_key in router.outstanding_claims()
-        # The claim stays in flight: an interrupted effect may have partly landed.
-        with pytest.raises(DuplicateSuppressed):
-            router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-
-    def test_an_immediately_failing_backend_is_not_recorded_as_a_result(
-        self, registry, engine, store
-    ):
+    def test_a_clear_failure_releases_it_for_a_real_retry(self, registry, engine, store):
         class Failing(FakeBackend):
             def status(self, handle):
                 return TaskStatus(handle=handle, state=TaskState.FAILED)
 
         router = CapabilityRouter(registry, engine, store)
         router.register_backend(Failing("flaky", ["ci.rerun_job"]))
-        router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert [s.event for s in store.scan(kinds=[EventKind.TOOL_RESULT])] == []
-        errors = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])]
-        assert len(errors) == 1 and errors[0].meta["state"] == "failed"
+        request = Request("ci.rerun_job", "j", {"job_id": "j"})
+        assert router.invoke(request).claim is ClaimOutcome.RELEASED
+        assert router.invoke(request).handle is not None  # retry permitted
 
-
-class TestThirdReviewFindings:
-    """Regression coverage for the third review round."""
-
-    def test_a_completed_claim_keeps_its_result_reference(self, router):
-        """DONE means 'return what happened before', which needs the reference."""
-        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert result.claim is ClaimOutcome.COMPLETED
-        ledger = router._idempotency
-        assert ledger.claim(result.idempotency_key).result_ref == result.handle.id
-
-    def test_an_unreadable_status_is_recorded_as_uncertain_not_as_success(
-        self, registry, engine, store
-    ):
-        """Recording it as a plain result would assert a certainty the code
-        has explicitly refused to have."""
-        class Silent(FakeBackend):
+    @pytest.mark.parametrize("state", [TaskState.PENDING, TaskState.RUNNING,
+                                       TaskState.INTERRUPTED, None])
+    def test_anything_unclear_holds_the_claim(self, registry, engine, store, state):
+        """Guessing either way sends the message twice, or never."""
+        class Unclear(FakeBackend):
             def status(self, handle):
-                raise RuntimeError("status endpoint down")
+                if state is None:
+                    raise RuntimeError("status endpoint down")
+                return TaskStatus(handle=handle, state=state)
 
         router = CapabilityRouter(registry, engine, store)
-        router.register_backend(Silent("silent", ["ci.rerun_job"]))
-        router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert [s.event for s in store.scan(kinds=[EventKind.TOOL_RESULT])] == []
-        errors = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])]
-        assert len(errors) == 1
-        assert errors[0].meta["effect_uncertain"] is True
-        assert errors[0].meta["state"] == "unknown"
+        router.register_backend(Unclear("unclear", ["ci.rerun_job"]))
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert result.claim is ClaimOutcome.HELD and result.settled is False
+        assert router.outstanding_claims() == [result.idempotency_key]
+
+    def test_a_held_claim_is_resolved_with_its_token(self, registry, engine, store):
+        class Pending(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.PENDING)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Pending("queue", ["ci.rerun_job"]))
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert router.resolve(result.claim_token, ClaimOutcome.COMPLETED, "done") is True
+        assert router.outstanding_claims() == []
+
+    def test_a_superseded_token_cannot_resolve_a_newer_attempt(self, registry, engine, store):
+        """The exact bug the token's generation exists to prevent."""
+        class Failing(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.FAILED)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Failing("flaky", ["ci.rerun_job"]))
+        request = Request("ci.rerun_job", "j", {"job_id": "j"})
+        first = router.invoke(request)     # released
+        second = router.invoke(request)    # live retry, also released
+        assert router.resolve(first.claim_token, ClaimOutcome.COMPLETED) is False
+        assert first.claim_token.generation != second.claim_token.generation
+
+    def test_resolve_refuses_a_nonsensical_outcome(self, router):
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        with pytest.raises(ValueError, match="cannot resolve"):
+            router.resolve(result.claim_token, ClaimOutcome.HELD)
+
+    def test_read_only_work_never_takes_a_claim(self, router):
+        result = router.invoke(Request("ci.read_status", "repo"))
+        assert result.claim is ClaimOutcome.NOT_APPLICABLE
+        assert result.claim_token is None and result.idempotency_key is None
+
+    @pytest.mark.parametrize(
+        "actor,expected",
+        [("user", Actor.USER), ("agent", Actor.AGENT), ("watcher:ci", Actor.WATCHER),
+         ("subconscious", Actor.SUBCONSCIOUS), ("system", Actor.SYSTEM)],
+    )
+    def test_actors_are_not_all_attributed_to_the_human(self, router, store, actor, expected):
+        """Attributing unattended work to the user is the one mistake an audit
+        trail must never make."""
+        router.invoke(Request("ci.read_status", "repo", actor=actor))
+        invokes = [s.event for s in store.scan(kinds=[EventKind.CAPABILITY_INVOKE])]
+        assert invokes[-1].actor is expected and invokes[-1].actor_id == actor
+
+    def test_refusals_leave_a_trail(self, router, store: RecordStore):
+        """A quarantined agent probing every capability must be visible."""
+        for capability in ("ci.read_status", "ci.rerun_job", "message.send"):
+            with pytest.raises(PolicyDenied):
+                router.invoke(Request(capability, "t", quarantined=True))
+        decisions = [s.event for s in store.scan(kinds=[EventKind.POLICY_DECISION])]
+        assert len(decisions) == 3
+        assert all(e.meta["quarantined"] is True for e in decisions)
+
+    def test_machine_refusals_are_not_recorded_as_human_denials(self, router, store):
+        """'The kill switch stopped it' must not read as 'you said no'."""
+        with pytest.raises(PolicyDenied):
+            router.invoke(Request("vehicle.drive", "car"))
+        assert [s.event for s in store.scan(kinds=[EventKind.APPROVAL_DENY])] == []
+        assert [s.event for s in store.scan(kinds=[EventKind.POLICY_DECISION])][-1] \
+            .meta["outcome"] == "deny"
+
+    def test_an_approval_gate_is_recorded_as_a_correlatable_request(self, router, store):
+        with pytest.raises(ApprovalRequired) as caught:
+            router.invoke(Request("message.send", "sam", {"to": "sam", "body": "hi"}))
+        requests = [s.event for s in store.scan(kinds=[EventKind.APPROVAL_REQUEST])]
+        assert len(requests) == 1 and requests[0].is_permanent
+        assert requests[0].meta["approval_request_id"] == caught.value.request_id
+
+    def test_unknown_capability_raises_the_documented_refusal_type(self, router):
+        with pytest.raises(PolicyDenied, match="unknown capability"):
+            router.invoke(Request("nope.invent", "t"))
 
     def test_a_mismatched_task_is_recorded_as_a_refusal(self, router, store: RecordStore):
         """Neither a dangling allow nor silence: a caller must not be able to
@@ -384,133 +370,55 @@ class TestThirdReviewFindings:
                 Task("ci.rerun_job", "j", {"job_id": "other"}),
             )
         decisions = [s.event for s in store.scan(kinds=[EventKind.POLICY_DECISION])]
-        assert len(decisions) == 1
-        assert decisions[0].meta["outcome"] == "deny"
-        assert "does not match" in decisions[0].meta["reason"]
+        assert len(decisions) == 1 and decisions[0].meta["outcome"] == "deny"
         assert [s.event for s in store.scan(kinds=[EventKind.CAPABILITY_INVOKE])] == []
 
-    def test_outstanding_claims_are_enumerable(self, registry, engine, store):
-        class Interrupted(FakeBackend):
-            def status(self, handle):
-                return TaskStatus(handle=handle, state=TaskState.INTERRUPTED)
-
+    def test_a_routing_failure_does_not_strand_the_claim(self, registry, engine, store):
         router = CapabilityRouter(registry, engine, store)
-        router.register_backend(Interrupted("stopped", ["ci.rerun_job"]))
-        assert router.outstanding_claims() == []
-        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert router.outstanding_claims() == [result.idempotency_key]
-
-
-class TestFourthReviewFindings:
-    """Regression coverage for the fourth round -- all one root cause."""
-
-    def test_a_stale_handle_cannot_settle_a_later_retry(self, registry, engine, store):
-        """Keys hash the action, so a retry shares its predecessor's key. A
-        dead handle left bound would release the retry's live claim, and a
-        third attempt would duplicate the side effect."""
-        states = iter([TaskState.FAILED, TaskState.PENDING, TaskState.PENDING])
-
-        class Varying(FakeBackend):
-            def status(self, handle):
-                return TaskStatus(handle=handle, state=next(states, TaskState.PENDING))
-
-        router = CapabilityRouter(registry, engine, store)
-        backend = Varying("primary", ["ci.rerun_job"])
-        router.register_backend(backend)
         request = Request("ci.rerun_job", "j", {"job_id": "j"})
+        with pytest.raises(NoBackendAvailable):
+            router.invoke(request)
+        router.register_backend(FakeBackend("late", ["ci.rerun_job"]))
+        assert router.invoke(request).handle is not None
 
-        first = router.invoke(request)          # fails -> claim released
-        assert first.claim is ClaimOutcome.RELEASED
-        second = router.invoke(request)         # legitimate retry, still running
-        assert second.claim is ClaimOutcome.PENDING
-
-        # Settling the *dead* handle must not touch the live retry's claim, and
-        # must say which case this is rather than reporting "no claim".
-        assert router.settle(first, backend) is ClaimOutcome.UNKNOWN
-        assert router.outstanding_claims() == [second.idempotency_key]
-
-    def test_a_backend_reusing_a_handle_id_is_refused_loudly(self, registry, engine, store):
-        """Silently overwriting the binding strands the first claim forever.
-        Raising surfaces the adapter bug while it is still cheap to find."""
-        class Fixed(FakeBackend):
-            def execute(self, task, idempotency_key=None):
-                self.executions.append((task, idempotency_key))
-                return TaskHandle(id="job-1", backend_id=self.id,
-                                  idempotency_key=idempotency_key)
-
+    def test_an_unreadable_status_is_recorded_as_uncertain(self, registry, engine, store):
+        class Silent(FakeBackend):
             def status(self, handle):
-                return TaskStatus(handle=handle, state=TaskState.PENDING)
+                raise RuntimeError("status endpoint down")
 
         router = CapabilityRouter(registry, engine, store)
-        router.register_backend(Fixed("alpha", ["ci.rerun_job"]))
-        first = router.invoke(Request("ci.rerun_job", "a", {"job_id": "a"}))
-        with pytest.raises(ValueError, match="already bound to a different claim"):
-            router.invoke(Request("ci.rerun_job", "b", {"job_id": "b"}))
-
-        # The first claim is untouched and still resolvable...
-        assert router.settle(first, next(b for b in router._backends)) is ClaimOutcome.PENDING
-        # ...and the second's effect landed, so its claim is held and visible
-        # rather than silently lost, with the conflict recorded.
-        assert len(router.outstanding_claims()) == 2
+        router.register_backend(Silent("silent", ["ci.rerun_job"]))
+        router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert [s.event for s in store.scan(kinds=[EventKind.TOOL_RESULT])] == []
         errors = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])]
-        assert errors[-1].meta["error"] == "handle_binding_conflict"
+        assert len(errors) == 1 and errors[0].meta["effect_uncertain"] is True
 
-    def test_bindings_survive_a_router_restart(self, registry, engine, store):
-        """The ledger is the durable side; an in-process map would lose this
-        and strand the claim forever."""
-        class Pending(FakeBackend):
-            def status(self, handle):
-                return TaskStatus(handle=handle, state=TaskState.PENDING)
+    def test_a_failure_is_visible_in_the_audit_trail(self, registry, engine, store):
+        from jarvis_core.record.projections import AuditProjection
 
-        ledger = IdempotencyLedger()
-        backend = Pending("primary", ["ci.rerun_job"])
-        first_router = CapabilityRouter(registry, engine, store, ledger)
-        first_router.register_backend(backend)
-        result = first_router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-
-        fresh = CapabilityRouter(registry, engine, store, ledger)
-        fresh.register_backend(backend)
-        assert fresh.settle(result, backend) is ClaimOutcome.PENDING
-
-
-class TestFifthReviewFindings:
-    """Regression coverage for the fifth round."""
-
-    def test_no_claim_is_distinguishable_from_a_stranded_one(self, router):
-        """A poll loop must tell 'read-only' from 'the claim is stuck'."""
-        read_only = router.invoke(Request("ci.read_status", "repo"))
-        backend = next(b for b in router._backends if b.id == "primary")
-        assert router.settle(read_only, backend) is ClaimOutcome.NOT_APPLICABLE
-        assert ClaimOutcome.NOT_APPLICABLE.needs_attention is False
-        assert ClaimOutcome.UNKNOWN.needs_attention is True
-        assert ClaimOutcome.STUCK.needs_attention is True
-
-    def test_a_stranded_claim_can_be_released_through_the_public_api(
-        self, registry, engine, store
-    ):
-        class Interrupted(FakeBackend):
-            def status(self, handle):
-                return TaskStatus(handle=handle, state=TaskState.INTERRUPTED)
+        class Exploding(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                raise RuntimeError("boom")
 
         router = CapabilityRouter(registry, engine, store)
-        router.register_backend(Interrupted("stopped", ["ci.rerun_job"]))
-        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert router.outstanding_claims() == [result.idempotency_key]
-        assert router.release_claim(result.idempotency_key) is True
-        assert router.outstanding_claims() == []
+        router.register_backend(Exploding("flaky", ["ci.rerun_job"]))
+        with pytest.raises(RuntimeError):
+            router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert EventKind.TOOL_ERROR in [e.kind for e in AuditProjection(store).trail()]
 
-    def test_a_stale_poll_cannot_resolve_a_newer_attempt(self, registry, engine, store):
-        """Without generations, a late complete() buries a re-claim: release()
-        then no-ops and the action is suppressed forever."""
-        ledger = IdempotencyLedger()
-        key = "k"
-        first = ledger.claim(key)
-        assert ledger.release(key, generation=first.generation) is True
-        second = ledger.claim(key)
-        # A poll from the first attempt must not touch the second.
-        assert ledger.complete(key, "old-result", generation=first.generation) is False
-        assert ledger.state(key) is ClaimState.IN_FLIGHT
-        assert ledger.complete(key, "new-result", generation=second.generation) is True
+    def test_a_failed_call_leaves_the_claim_held(self, registry, engine, store):
+        """A stuck claim needs a human; a wrongly released one sends twice."""
+        class Exploding(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                raise RuntimeError("boom")
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Exploding("flaky", ["ci.rerun_job"]))
+        request = Request("ci.rerun_job", "j", {"job_id": "j"})
+        with pytest.raises(RuntimeError):
+            router.invoke(request)
+        with pytest.raises(DuplicateSuppressed):
+            router.invoke(request)
 
 
 class TestScriptedWorkload:

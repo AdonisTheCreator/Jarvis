@@ -55,11 +55,15 @@ src/jarvis_core/
 - **Jev decides; the Policy Engine authorizes.** A calibrated probability is
   never an approval.
 - **Runtimes propose memory; the core writes it.**
+- **The claim token carries its generation.** Keys hash the *action*, so every
+  retry shares its predecessor's key; without the generation a late resolution
+  settles a newer attempt. Anything unclear holds the claim — guessing sends
+  the message twice or never.
 
 ## Commands
 
 ```bash
-python3 -m pytest -q          # 214 tests, ~0.4s
+python3 -m pytest -q          # 253 tests, ~0.6s
 python3 -m pytest tests/test_invariants.py    # the vendor-freedom check
 ```
 

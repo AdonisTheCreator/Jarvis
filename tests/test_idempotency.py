@@ -41,27 +41,6 @@ class TestLedger:
         assert ledger.claim("k").should_execute is True
         assert ledger.claim("k").should_execute is False
 
-    def test_completed_work_is_not_repeated(self):
-        ledger = IdempotencyLedger()
-        ledger.claim("k")
-        ledger.complete("k", "result-1")
-        claim = ledger.claim("k")
-        assert claim.state is ClaimState.DONE and claim.result_ref == "result-1"
-
-    def test_release_allows_a_genuine_retry(self):
-        ledger = IdempotencyLedger()
-        ledger.claim("k")
-        ledger.release("k")
-        assert ledger.claim("k").should_execute is True
-
-    def test_release_cannot_undo_a_completed_claim(self):
-        """Releasing a done claim would permit exactly the duplicate we prevent."""
-        ledger = IdempotencyLedger()
-        ledger.claim("k")
-        ledger.complete("k")
-        ledger.release("k")
-        assert ledger.state("k") is ClaimState.DONE
-
     def test_concurrent_claims_yield_exactly_one_executor(self):
         import threading
 
@@ -82,95 +61,71 @@ class TestLedger:
         assert sum(winners) == 1
 
 
-class TestHandleBindings:
-    """Direct coverage for bind / key_for / unbind -- the claim lifecycle's
-    most subtle part, and previously only exercised through the router."""
+class TestTokenResolution:
+    """Tokens replace the handle-binding protocol: whoever took the claim
+    holds the proof needed to resolve it."""
 
-    def test_bind_and_resolve(self):
+    def test_a_fresh_claim_yields_a_token(self):
         ledger = IdempotencyLedger()
-        ledger.claim("k")
-        ledger.bind("k", "alpha:job-1")
-        assert ledger.key_for("alpha:job-1") == "k"
+        token = ledger.claim("k").token
+        assert token.key == "k" and token.generation >= 1
 
-    def test_unknown_handle_resolves_to_nothing(self):
-        assert IdempotencyLedger().key_for("nope:1") is None
-
-    def test_rebinding_the_same_key_is_idempotent(self):
+    def test_completing_with_the_token_records_the_result(self):
         ledger = IdempotencyLedger()
-        ledger.claim("k")
-        ledger.bind("k", "alpha:job-1")
-        ledger.bind("k", "alpha:job-1")
-        assert ledger.key_for("alpha:job-1") == "k"
+        token = ledger.claim("k").token
+        assert ledger.complete(token, "result-1") is True
+        assert ledger.claim("k").result_ref == "result-1"
 
-    def test_two_claims_cannot_share_a_handle_reference(self):
-        """Silently overwriting strands the first claim forever."""
+    def test_completing_twice_is_refused(self):
         ledger = IdempotencyLedger()
-        ledger.claim("first")
-        ledger.claim("second")
-        ledger.bind("first", "alpha:job-1")
-        with pytest.raises(ValueError, match="already bound to a different claim"):
-            ledger.bind("second", "alpha:job-1")
-        assert ledger.key_for("alpha:job-1") == "first"
+        token = ledger.claim("k").token
+        ledger.complete(token, "r1")
+        assert ledger.complete(token, "r2") is False
+        assert ledger.claim("k").result_ref == "r1"
 
-    def test_completing_a_claim_drops_every_handle_pointing_at_it(self):
-        """Keys hash the action, so a retry shares its predecessor's key. A
-        dead handle left bound would settle the retry's live claim."""
+    def test_releasing_allows_a_genuine_retry(self):
         ledger = IdempotencyLedger()
-        ledger.claim("k")
-        ledger.bind("k", "alpha:job-1")
-        ledger.bind("k", "alpha:job-2")
-        ledger.complete("k", "result")
-        assert ledger.key_for("alpha:job-1") is None
-        assert ledger.key_for("alpha:job-2") is None
+        token = ledger.claim("k").token
+        assert ledger.release(token) is True
+        assert ledger.claim("k").should_execute is True
 
-    def test_releasing_a_claim_drops_its_handles(self):
+    def test_release_cannot_undo_a_completed_claim(self):
+        """Releasing a done claim would permit exactly the duplicate we prevent."""
         ledger = IdempotencyLedger()
-        ledger.claim("k")
-        ledger.bind("k", "alpha:job-1")
-        ledger.release("k")
-        assert ledger.key_for("alpha:job-1") is None
+        token = ledger.claim("k").token
+        ledger.complete(token)
+        assert ledger.release(token) is False
+        assert ledger.state("k") is ClaimState.DONE
 
-    def test_bindings_do_not_leak_between_keys(self):
+    def test_each_attempt_gets_a_new_generation(self):
         ledger = IdempotencyLedger()
-        ledger.claim("a")
-        ledger.claim("b")
-        ledger.bind("a", "alpha:1")
-        ledger.bind("b", "alpha:2")
-        ledger.complete("a")
-        assert ledger.key_for("alpha:1") is None
-        assert ledger.key_for("alpha:2") == "b"
-
-
-class TestGenerations:
-    """A late poll from an earlier attempt must not resolve a newer one."""
-
-    def test_each_fresh_claim_gets_a_new_generation(self):
-        ledger = IdempotencyLedger()
-        first = ledger.claim("k")
-        ledger.release("k")
-        second = ledger.claim("k")
+        first = ledger.claim("k").token
+        ledger.release(first)
+        second = ledger.claim("k").token
         assert second.generation > first.generation
 
-    def test_a_stale_complete_is_refused(self):
+    def test_a_stale_token_cannot_complete_a_newer_attempt(self):
+        """Without this, a late resolution buries a re-claim: release then
+        no-ops and the action is suppressed forever."""
         ledger = IdempotencyLedger()
-        first = ledger.claim("k")
-        ledger.release("k", generation=first.generation)
-        second = ledger.claim("k")
-        assert ledger.complete("k", generation=first.generation) is False
+        first = ledger.claim("k").token
+        ledger.release(first)
+        second = ledger.claim("k").token
+        assert ledger.complete(first, "stale") is False
         assert ledger.state("k") is ClaimState.IN_FLIGHT
-        assert ledger.complete("k", generation=second.generation) is True
+        assert ledger.complete(second, "fresh") is True
 
-    def test_a_stale_release_is_refused(self):
+    def test_a_stale_token_cannot_release_a_newer_attempt(self):
         ledger = IdempotencyLedger()
-        first = ledger.claim("k")
-        ledger.release("k", generation=first.generation)
+        first = ledger.claim("k").token
+        ledger.release(first)
         ledger.claim("k")
-        assert ledger.release("k", generation=first.generation) is False
+        assert ledger.release(first) is False
         assert ledger.state("k") is ClaimState.IN_FLIGHT
 
-    def test_completing_a_done_claim_is_refused(self):
+    def test_unresolved_claims_are_enumerable(self):
         ledger = IdempotencyLedger()
-        ledger.claim("k")
-        assert ledger.complete("k", "r1") is True
-        assert ledger.complete("k", "r2") is False
-        assert ledger.claim("k").result_ref == "r1"
+        ledger.claim("a")
+        held = ledger.claim("b").token
+        ledger.complete(held)
+        assert ledger.in_flight() == ["a"]
