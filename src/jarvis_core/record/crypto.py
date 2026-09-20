@@ -104,9 +104,12 @@ class SubjectKeystore:
     def ensure_subject(self, subject: str) -> None:
         """Create a key for ``subject`` if it has none. Idempotent.
 
-        Deliberately does *not* resurrect a shredded subject: a caller that
-        wants that must say so, so an accidental re-create cannot silently
-        undo a forget.
+        This *does* mint a key for a previously shredded subject, and
+        :meth:`seal` relies on it: writing about someone again after erasing
+        them is a legitimate new act. What must never happen is the old
+        payloads becoming readable again, and that is the Record's key epoch's
+        job (``RecordStore.current_epoch``) -- blobs are namespaced by it, so a
+        new key never unlocks an old blob.
         """
         with self._lock:
             if self._vault.get(subject) is not None:
