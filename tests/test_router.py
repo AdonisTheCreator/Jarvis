@@ -607,6 +607,38 @@ class TestClaimLifecycle:
         router.register_backend(backend)
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
         assert result.claim is ClaimOutcome.ALREADY_RESOLVED
+        # The claim says who owns the ledger row; effect_landed says whether
+        # retrying is safe. Here the effect did land.
+        assert result.effect_landed is True
+
+    @pytest.mark.parametrize(
+        "state,expected",
+        [
+            (TaskState.SUCCEEDED, True),
+            (TaskState.FAILED, False),
+            (TaskState.CANCELLED, None),
+            (TaskState.INTERRUPTED, None),
+            (TaskState.PENDING, None),
+            (None, None),
+        ],
+    )
+    def test_effect_landed_is_independent_of_the_claim_outcome(
+        self, registry, engine, store, state, expected
+    ):
+        """ALREADY_RESOLVED arises from both a success and a failure, so a
+        caller deciding retry-safety needs this fact separately."""
+        class Reporting(FakeBackend):
+            def status(self, handle):
+                if state is None:
+                    raise RuntimeError("status endpoint down")
+                return TaskStatus(handle=handle, state=state)
+
+        fresh = RecordStore(store.root / f"el-{state.value if state else 'none'}",
+                            store._keystore)
+        router = CapabilityRouter(registry, engine, fresh)
+        router.register_backend(Reporting("r", ["ci.rerun_job"]))
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert result.effect_landed is expected
 
     def test_a_held_notice_can_be_matched_to_its_closer(self, registry, engine, store):
         """Keys hash the action, so attempts share a key; only the generation

@@ -74,7 +74,12 @@ class ClaimOutcome(StrEnum):
     """Someone else resolved it first -- typically a concurrent force_release.
     Distinct from COMPLETED because the ledger holds no DONE row, so reporting
     it as ours would let the next invoke re-send an effect the Record claims
-    already completed."""
+    already completed.
+
+    It says nothing about whether the effect landed, because it can arise from
+    either a success or a failure. Read :attr:`Invocation.effect_landed` for
+    that -- retry-safety is a separate fact from claim ownership, and folding
+    them together is what produced a string of wrong answers here before."""
 
     @property
     def resolved(self) -> bool:
@@ -96,6 +101,13 @@ class Invocation:
     handle: TaskHandle | None
     backend_id: str | None
     event_id: str
+    effect_landed: bool | None = None
+    """Whether the side effect happened: True, False, or None for unknown.
+
+    Deliberately separate from :attr:`claim`. The claim says who owns the
+    ledger row; this says whether retrying is safe, and the two genuinely come
+    apart -- ``ALREADY_RESOLVED`` arises from both a success and a failure.
+    """
     session: str = "default"
     subject_keys: tuple[str, ...] = ("system",)
     """Where this invocation was recorded. Passed back to :meth:`resolve` so
@@ -112,6 +124,15 @@ class Invocation:
     @property
     def settled(self) -> bool:
         return self.claim.resolved
+
+
+def _effect_landed(state: TaskState | None) -> bool | None:
+    """Did the side effect happen? True, False, or None for not knowable."""
+    if state is TaskState.SUCCEEDED:
+        return True
+    if state is not None and state.guarantees_no_effect:
+        return False
+    return None
 
 
 def _actor_of(actor: str) -> Actor:
@@ -340,6 +361,7 @@ class CapabilityRouter:
 
         return Invocation(
             decision=decision,
+            effect_landed=_effect_landed(state),
             session=request.session,
             subject_keys=task.subject_keys or ("system",),
             handle=handle,

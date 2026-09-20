@@ -708,8 +708,9 @@ stays small.**
   never.
 
 **Result:** −106 lines, 5 outcome states instead of 7, 6 ledger methods instead
-of 8. (The suite has since grown to 290 tests through the review rounds that
-followed.)
+of 8. The review rounds that followed added `ALREADY_RESOLVED` back and split
+`effect_landed` out of the claim outcome, on the same principle: one value,
+one fact.
 
 **The general lesson, worth keeping.** When review findings stop converging and
 start circling one component, the component is usually the problem. The fix is
