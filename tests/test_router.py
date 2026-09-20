@@ -11,7 +11,7 @@ from jarvis_core.ids import new_ulid
 from jarvis_core.policy import PolicyEngine, Request
 from jarvis_core.record import Actor, EventKind, RecordStore
 from jarvis_core.router import (
-    CapabilityRouter, DuplicateSuppressed, NoBackendAvailable, TaskMismatch,
+    CapabilityRouter, ClaimOutcome, DuplicateSuppressed, NoBackendAvailable, TaskMismatch,
 )
 
 
@@ -192,7 +192,7 @@ class TestReviewFindings:
         router = CapabilityRouter(registry, engine, store)
         router.register_backend(Queueing("queue", ["ci.rerun_job"]))
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert result.settled is False
+        assert result.claim is ClaimOutcome.PENDING and result.settled is False
 
     def test_a_failed_async_task_releases_the_claim_for_a_real_retry(self, registry, engine, store):
         class Failing(FakeBackend):
@@ -202,7 +202,7 @@ class TestReviewFindings:
         router = CapabilityRouter(registry, engine, store)
         router.register_backend(Failing("flaky", ["ci.rerun_job"]))
         request = Request("ci.rerun_job", "j", {"job_id": "j"})
-        assert router.invoke(request).settled is True
+        assert router.invoke(request).claim is ClaimOutcome.RELEASED
         assert router.invoke(request).handle is not None  # retry permitted
 
     @pytest.mark.parametrize(
@@ -282,22 +282,39 @@ class TestSecondReviewFindings:
                                Task("ci.rerun_job", "j", params))
         assert result.handle is not None
 
-    def test_settle_refuses_to_pretend_without_a_key(self, registry, engine, store):
-        """Adapters are not required to echo the key; silently returning
-        'resolved' would strand the claim forever."""
+    def test_settle_works_even_when_the_adapter_echoes_nothing(self, registry, engine, store):
+        """The router took the claim, so it is the authority on whether a
+        handle has one -- not the adapter."""
         class Bare(FakeBackend):
             def execute(self, task, idempotency_key=None):
                 self.executions.append((task, idempotency_key))
                 return TaskHandle(id=new_ulid(), backend_id=self.id)  # no key echoed
 
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.PENDING)
+
         router = CapabilityRouter(registry, engine, store)
         backend = Bare("bare", ["ci.rerun_job"])
         router.register_backend(backend)
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        with pytest.raises(ValueError, match="needs the idempotency key"):
-            router.settle(backend, result.handle)
-        # Supplying it from the Invocation works.
-        assert router.settle(backend, result.handle, result.idempotency_key) is True
+        assert result.claim is ClaimOutcome.PENDING
+        assert router.settle(backend, result.handle) is ClaimOutcome.PENDING
+        assert result.idempotency_key in router.stuck_claims()
+
+    def test_settle_is_a_no_op_for_read_only_work(self, router):
+        """A generic poll loop must not crash on the first read-only handle."""
+        result = router.invoke(Request("ci.read_status", "repo"))
+        backend = next(b for b in router._backends if b.id == "primary")
+        assert router.settle(backend, result.handle) is ClaimOutcome.NOT_APPLICABLE
+
+    def test_a_transposed_key_is_refused_rather_than_guessed(self, registry, engine, store):
+        router = CapabilityRouter(registry, engine, store)
+        backend = FakeBackend("primary", ["ci.rerun_job"])
+        router.register_backend(backend)
+        first = router.invoke(Request("ci.rerun_job", "a", {"job_id": "a"}))
+        second = router.invoke(Request("ci.rerun_job", "b", {"job_id": "b"}))
+        with pytest.raises(ValueError, match="refusing to settle the wrong claim"):
+            router.settle(backend, first.handle, second.idempotency_key)
 
     def test_interrupted_is_terminal_so_polling_terminates(self, registry, engine, store):
         class Interrupted(FakeBackend):
@@ -308,7 +325,8 @@ class TestSecondReviewFindings:
         backend = Interrupted("stopped", ["ci.rerun_job"])
         router.register_backend(backend)
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert result.settled is True  # polling ends
+        assert result.claim is ClaimOutcome.STUCK and result.settled is True
+        assert result.idempotency_key in router.stuck_claims()
         # The claim stays in flight: an interrupted effect may have partly landed.
         with pytest.raises(DuplicateSuppressed):
             router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
@@ -326,6 +344,55 @@ class TestSecondReviewFindings:
         assert [s.event for s in store.scan(kinds=[EventKind.TOOL_RESULT])] == []
         errors = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])]
         assert len(errors) == 1 and errors[0].meta["state"] == "failed"
+
+
+class TestThirdReviewFindings:
+    """Regression coverage for the third review round."""
+
+    def test_a_completed_claim_keeps_its_result_reference(self, router):
+        """DONE means 'return what happened before', which needs the reference."""
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert result.claim is ClaimOutcome.COMPLETED
+        ledger = router._idempotency
+        assert ledger.claim(result.idempotency_key).result_ref == result.handle.id
+
+    def test_an_unreadable_status_is_recorded_as_uncertain_not_as_success(
+        self, registry, engine, store
+    ):
+        """Recording it as a plain result would assert a certainty the code
+        has explicitly refused to have."""
+        class Silent(FakeBackend):
+            def status(self, handle):
+                raise RuntimeError("status endpoint down")
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Silent("silent", ["ci.rerun_job"]))
+        router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert [s.event for s in store.scan(kinds=[EventKind.TOOL_RESULT])] == []
+        errors = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])]
+        assert len(errors) == 1
+        assert errors[0].meta["effect_uncertain"] is True
+        assert errors[0].meta["state"] == "unknown"
+
+    def test_a_mismatched_task_leaves_no_dangling_allow(self, router, store: RecordStore):
+        """An allow with no outcome and no error breaks the trail's meaning."""
+        with pytest.raises(TaskMismatch):
+            router.invoke(
+                Request("ci.rerun_job", "j", {"job_id": "j"}),
+                Task("ci.rerun_job", "j", {"job_id": "other"}),
+            )
+        assert list(store.scan()) == []  # nothing recorded at all
+
+    def test_stuck_claims_are_enumerable(self, registry, engine, store):
+        class Interrupted(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.INTERRUPTED)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Interrupted("stopped", ["ci.rerun_job"]))
+        assert router.stuck_claims() == []
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert router.stuck_claims() == [result.idempotency_key]
 
 
 class TestScriptedWorkload:

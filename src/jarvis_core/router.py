@@ -20,6 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
+from enum import StrEnum
+
 from .backend import AgentBackend, Estimate, Task, TaskHandle, TaskState
 from .capability import Capability, CapabilityRegistry
 from .errors import ApprovalRequired, JarvisCoreError, PolicyDenied
@@ -49,6 +51,31 @@ class TaskMismatch(JarvisCoreError):
     """
 
 
+class ClaimOutcome(StrEnum):
+    """What became of a side effect's idempotency claim.
+
+    A boolean could not express the case that matters most: a task that is
+    *terminal* but whose effect may have partly landed. Callers poll while the
+    outcome is ``PENDING`` and stop otherwise -- ``STUCK`` ends the loop and
+    asks for a human rather than guessing in either direction.
+    """
+
+    NOT_APPLICABLE = "not_applicable"
+    """The capability is not side-effecting; there was never a claim."""
+    COMPLETED = "completed"
+    RELEASED = "released"
+    """Definitively did not take effect. A retry is legitimate."""
+    PENDING = "pending"
+    """Still running. Keep polling."""
+    STUCK = "stuck"
+    """Terminal, effect uncertain. The claim stays held until a human resolves it."""
+
+    @property
+    def resolved(self) -> bool:
+        """True when polling can stop."""
+        return self is not ClaimOutcome.PENDING
+
+
 @dataclass(frozen=True, slots=True)
 class Candidate:
     backend: AgentBackend
@@ -65,9 +92,15 @@ class Invocation:
     backend_id: str | None
     event_id: str
     idempotency_key: str | None = None
-    settled: bool = False
-    """False when the backend returned a non-terminal state. The idempotency
-    claim stays in flight until :meth:`CapabilityRouter.settle` resolves it."""
+    claim: ClaimOutcome = ClaimOutcome.NOT_APPLICABLE
+    """What became of the idempotency claim. ``PENDING`` means the caller
+    should poll :meth:`CapabilityRouter.settle`; ``STUCK`` means the effect is
+    uncertain and the claim is held for a human."""
+
+    @property
+    def settled(self) -> bool:
+        """True when no further polling is needed."""
+        return self.claim.resolved
 
 
 def _actor_of(actor: str) -> Actor:
@@ -101,6 +134,15 @@ class CapabilityRouter:
         self._record = record
         self._idempotency = idempotency or IdempotencyLedger()
         self._backends: list[AgentBackend] = []
+        self._claims_by_handle: dict[str, str] = {}
+        """handle id -> idempotency key, for the claims *this router* issued.
+
+        The router is what took the claim, so it is the authority on whether a
+        handle has one. Depending on the adapter to echo the key made the two
+        cases indistinguishable -- a read-only task and a side-effecting task
+        whose adapter simply did not echo -- and the second one silently
+        stranded the claim.
+        """
 
     def register_backend(self, backend: AgentBackend) -> None:
         self._backends.append(backend)
@@ -143,6 +185,11 @@ class CapabilityRouter:
         """
         actor = _actor_of(request.actor)
 
+        # 0. A mismatched task is a caller bug, not a policy question. Checking
+        #    it first keeps the trail clean: otherwise an allow is written and
+        #    then nothing follows it.
+        task = self._task_for(request, task)
+
         # 1. Policy decides -- including on unknown capabilities, which it fails
         #    closed on. Looking the capability up first would turn a documented
         #    refusal into a raw KeyError.
@@ -159,7 +206,6 @@ class CapabilityRouter:
             raise ApprovalRequired(request.capability, decision.approval_request_id or "")
 
         capability = self._registry.require(request.capability)
-        task = self._task_for(request, task)
 
         # 2. Choose before claiming.
         backend = self.choose(task)
@@ -213,9 +259,15 @@ class CapabilityRouter:
             )
             raise
 
+        if key is not None:
+            self._claims_by_handle[handle.id] = key
         state = self._state_of(backend, handle)
-        settled = self._settle_claim(key, state)
-        failed = state in {TaskState.FAILED, TaskState.CANCELLED, TaskState.INTERRUPTED}
+        outcome = self._settle_claim(key, state, handle)
+        # ``state is None`` means status() raised: we do not know what happened,
+        # and recording that as a plain result would assert a certainty the code
+        # has explicitly refused to have.
+        uncertain = state is None or state is TaskState.INTERRUPTED
+        failed = uncertain or state in {TaskState.FAILED, TaskState.CANCELLED}
         self._record.append(
             make_event(
                 # A backend that reports failure immediately must not be
@@ -230,8 +282,8 @@ class CapabilityRouter:
                     "backend": backend.id,
                     "handle": handle.id,
                     "state": state.value if state else "unknown",
-                    "settled": settled,
-                    "effect_uncertain": state is TaskState.INTERRUPTED,
+                    "claim": outcome.value,
+                    "effect_uncertain": uncertain,
                 },
             )
         )
@@ -242,7 +294,7 @@ class CapabilityRouter:
             backend_id=backend.id,
             event_id=event.event.id,
             idempotency_key=key,
-            settled=settled,
+            claim=outcome,
         )
 
     def settle(
@@ -250,25 +302,47 @@ class CapabilityRouter:
         backend: AgentBackend,
         handle: TaskHandle,
         idempotency_key: str | None = None,
-    ) -> bool:
+    ) -> ClaimOutcome:
         """Resolve an in-flight claim for an asynchronous task.
 
         A queued effect that later fails must not stay recorded as done, or the
         legitimate retry is suppressed and the message is never sent. Callers
         poll this until it returns True.
 
-        The key must be supplied (from :attr:`Invocation.idempotency_key`) or
-        echoed by the adapter on the handle. The ``AgentBackend`` contract does
-        not *require* adapters to echo it, so relying on the handle alone would
-        silently return "resolved" while leaving the claim in flight forever.
+        The key is resolved from the router's own record of the claim it
+        issued, falling back to an explicit argument or one the adapter echoed
+        on the handle. Disagreement between any two is refused rather than
+        guessed, since settling one action off another's status would mark a
+        send DONE that never happened.
         """
-        key = idempotency_key or handle.idempotency_key
+        known = self._claims_by_handle.get(handle.id)
+        echoed = handle.idempotency_key
+        for label, candidate in (("router record", known), ("handle", echoed)):
+            if idempotency_key is not None and candidate is not None and idempotency_key != candidate:
+                # A transposed pair would settle one action off another's
+                # status, marking a send DONE that never happened.
+                raise ValueError(
+                    f"idempotency key {idempotency_key[:12]}… disagrees with the {label} for "
+                    f"handle {handle.id} ({candidate[:12]}…); refusing to settle the wrong claim"
+                )
+        key = known or idempotency_key or echoed
         if key is None:
-            raise ValueError(
-                "settle() needs the idempotency key -- pass Invocation.idempotency_key; "
-                "the backend contract does not require adapters to echo it on the handle"
-            )
-        return self._settle_claim(key, self._state_of(backend, handle))
+            # Either read-only, or a handle this router never issued. Nothing to
+            # settle is a valid answer, so a generic poll loop does not crash on
+            # the first non-side-effecting handle.
+            return ClaimOutcome.NOT_APPLICABLE
+        outcome = self._settle_claim(key, self._state_of(backend, handle), handle)
+        if outcome in {ClaimOutcome.COMPLETED, ClaimOutcome.RELEASED}:
+            self._claims_by_handle.pop(handle.id, None)
+        return outcome
+
+    def stuck_claims(self) -> list[str]:
+        """Idempotency keys held but unresolved -- work in flight, or stuck.
+
+        Either way they block the retry, so they must be visible rather than
+        silently permanent.
+        """
+        return self._idempotency.in_flight()
 
     # -- internals -------------------------------------------------------
 
@@ -354,27 +428,25 @@ class CapabilityRouter:
         except Exception:
             return None  # unknown: never guess about a side effect
 
-    def _settle_claim(self, key: str | None, state: TaskState | None) -> bool:
-        """Complete or release a claim. Returns True when polling can stop.
-
-        Covers every terminal state, including ``INTERRUPTED`` -- omitting it
-        would leave a documented "poll until True" loop running forever.
-        """
+    def _settle_claim(
+        self, key: str | None, state: TaskState | None, handle: TaskHandle | None = None
+    ) -> ClaimOutcome:
+        """Complete or release a claim, covering every terminal state."""
         if key is None:
-            return True
+            return ClaimOutcome.NOT_APPLICABLE
         if state is TaskState.SUCCEEDED:
-            self._idempotency.complete(key)
-            return True
+            # Keep the result reference: DONE means "return what happened
+            # before", which is impossible without it.
+            self._idempotency.complete(key, handle.id if handle else None)
+            return ClaimOutcome.COMPLETED
         if state in {TaskState.FAILED, TaskState.CANCELLED}:
-            # Definitively did not take effect -- a retry is legitimate.
             self._release(key)
-            return True
+            return ClaimOutcome.RELEASED
         if state is TaskState.INTERRUPTED:
-            # Terminal, but the effect may have partly landed. Stop polling and
-            # leave the claim in flight: a stuck claim needs a human, and that
-            # is the correct outcome here rather than a guess either way.
-            return True
-        return False  # pending, running, awaiting approval, or unknown
+            # Terminal, but the effect may have partly landed. Hold the claim
+            # and surface it rather than guessing in either direction.
+            return ClaimOutcome.STUCK
+        return ClaimOutcome.PENDING
 
     def _release(self, key: str | None) -> None:
         if key is not None:

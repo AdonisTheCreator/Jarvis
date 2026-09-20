@@ -111,6 +111,19 @@ class IdempotencyLedger:
             if current is not None and current.state is ClaimState.IN_FLIGHT:
                 del self._states[key]
 
+    def in_flight(self) -> list[str]:
+        """Keys still claimed but not completed.
+
+        A claim can legitimately sit here (work in progress) or be *stuck* --
+        an interrupted effect nobody resolved. Either way it blocks the retry,
+        so it must be enumerable rather than silently permanent.
+        """
+        with self._lock:
+            return sorted(
+                key for key, claim in self._states.items()
+                if claim.state is ClaimState.IN_FLIGHT
+            )
+
     def state(self, key: str) -> ClaimState | None:
         with self._lock:
             claim = self._states.get(key)
