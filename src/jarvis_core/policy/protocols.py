@@ -140,7 +140,8 @@ class ProtocolRegistry:
         remove (R8).
 
         A step that declares no parameters or no target places no constraint on
-        that dimension.
+        that dimension. A step that *does* declare parameters requires them to
+        match exactly -- subset matching would let undeclared extras through.
         """
         protocol = self._protocols.get(name)
         if protocol is None:
@@ -151,6 +152,9 @@ class ProtocolRegistry:
                 continue
             if step.target is not None and step.target != target:
                 continue
-            if all(supplied.get(k) == v for k, v in step.params.items()):
+            # Exact, not a subset: undeclared extras pass unchecked otherwise,
+            # which is the same fail-open shape as an unbound target. A step
+            # that declares no params still constrains none.
+            if not step.params or supplied == dict(step.params):
                 return True
         return False

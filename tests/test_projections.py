@@ -57,6 +57,13 @@ class TestRecall:
         add(store, EventKind.USER_TURN, subjects=["project:other"], payload=b"auth decision")
         assert len(RecallProjection(store).search("auth", scope=RecallScope.ARCHIVE)) == 2
 
+    def test_search_tolerates_payload_free_events(self, store: RecordStore):
+        """Policy decisions carry no payload; search must not raise on them."""
+        add(store, EventKind.POLICY_DECISION)
+        add(store, EventKind.USER_TURN, payload=b"the auth decision")
+        hits = RecallProjection(store).search("auth", scope=RecallScope.ARCHIVE)
+        assert len(hits) == 1
+
     def test_recent_requires_a_bound(self, store: RecordStore):
         """Unbounded, it would silently equal ARCHIVE -- a narrower-looking
         scope with none of the narrowing."""

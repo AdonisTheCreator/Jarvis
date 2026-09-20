@@ -226,6 +226,18 @@ class TestA3RequiresAProtocol:
         assert decision.outcome is Outcome.DENY
         assert "with these parameters" in decision.reason
 
+    def test_undeclared_extra_parameters_are_refused(self, engine, approvals, protocols):
+        """Subset matching lets extras through unchecked -- the same fail-open
+        shape as an unbound target."""
+        protocols.declare(self._protocol())
+        params = {"door": "front", "duration_minutes": 480}
+        token = approvals.issue("door.unlock", "front", params)
+        decision = engine.evaluate(
+            Request("door.unlock", "front", params, approval=token,
+                    protocol="evening_lockup", auth_level=AuthLevel.STRONG)
+        )
+        assert decision.outcome is Outcome.DENY
+
     def test_a_step_declaring_no_parameters_constrains_none(
         self, engine, approvals, protocols
     ):

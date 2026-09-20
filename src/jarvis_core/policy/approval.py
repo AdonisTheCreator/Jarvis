@@ -113,7 +113,6 @@ class ApprovalLedger:
             raise ValueError("approval secret must be at least 32 bytes")
         self._secret = secret
         self._spent: SpentStore = spent if spent is not None else InMemorySpentStore()
-        self._lock = threading.Lock()
 
     @property
     def durable(self) -> bool:

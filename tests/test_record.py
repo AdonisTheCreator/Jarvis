@@ -240,6 +240,36 @@ class TestRecordStore:
         assert store.payload_or_none(old.event) is None         # not resurrected
         assert store.verify() == 2
 
+    def test_the_epoch_survives_a_restart(self, store: RecordStore, keystore):
+        """Held in process memory it reset, and the dedup then reused a blob
+        sealed under the previous run's destroyed key."""
+        store.append(evt(subject_keys=["person:guest"]), b"same content")
+        store.forget_subject("person:guest")
+        assert store.current_epoch("person:guest") == 2
+
+        reopened = RecordStore(store.root, keystore)
+        assert reopened.current_epoch("person:guest") == 2
+        fresh = reopened.append(evt(subject_keys=["person:guest"]), b"same content")
+        assert reopened.payload(fresh.event) == b"same content"
+
+    def test_reading_never_resurrects_a_shredded_subject(self, store: RecordStore):
+        """With a real keyring this would write a fresh key for a subject the
+        user asked to erase."""
+        stored = store.append(evt(subject_keys=["person:guest"]), b"private")
+        store.forget_subject("person:guest")
+        assert store._keystore.is_forgotten("person:guest")
+
+        assert store.payload_or_none(stored.event) is None
+        assert store._keystore.is_forgotten("person:guest")
+        assert "person:guest" not in store._keystore.known_subjects()
+
+    def test_payload_free_events_read_as_none(self, store: RecordStore):
+        """Policy decisions, approvals and killswitch events carry none, and a
+        projection must not raise on them."""
+        stored = store.append(evt(kind=EventKind.POLICY_DECISION))
+        assert stored.event.payload_ref is None
+        assert store.payload_or_none(stored.event) is None
+
     def test_dedup_still_holds_within_one_key_epoch(self, store: RecordStore):
         a = store.append(evt(subject_keys=["project:jarvis"]), b"same content")
         b = store.append(evt(subject_keys=["project:jarvis"]), b"same content")

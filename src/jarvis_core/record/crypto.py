@@ -97,7 +97,6 @@ class SubjectKeystore:
             raise ValueError(f"master key must be {KEY_BYTES} bytes, got {len(master_key)}")
         self._master = AESGCM(master_key)
         self._vault: KeyVault = vault if vault is not None else InMemoryKeyVault()
-        self._epochs: dict[str, int] = {}
         self._lock = threading.Lock()
 
     # -- key lifecycle ---------------------------------------------------
@@ -113,11 +112,6 @@ class SubjectKeystore:
             if self._vault.get(subject) is not None:
                 return
             self._vault.put(subject, self._wrap(subject, AESGCM.generate_key(bit_length=256)))
-            # A new key means a new epoch. Payloads sealed under the previous
-            # one must stay unreachable, so the Record namespaces blobs by it
-            # -- otherwise re-writing the same content after a forget would
-            # re-seal the shared blob and un-forget the old event.
-            self._epochs[subject] = self._epochs.get(subject, 0) + 1
 
     def forget(self, subject: str) -> bool:
         """Destroy the subject's key. Returns True if a key was destroyed.
@@ -127,16 +121,6 @@ class SubjectKeystore:
         """
         with self._lock:
             return self._vault.delete(subject)
-
-    def epoch(self, subject: str) -> int:
-        """Which generation of this subject's key is current.
-
-        Increments every time a key is created, so a forget-then-write cycle
-        cannot make an earlier, already-forgotten payload readable again.
-        """
-        self.ensure_subject(subject)
-        with self._lock:
-            return self._epochs.get(subject, 1)
 
     def known_subjects(self) -> list[str]:
         return self._vault.subjects()

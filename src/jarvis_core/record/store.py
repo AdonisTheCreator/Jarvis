@@ -63,6 +63,7 @@ class RecordStore:
         self._keystore = keystore
         self._redact = redact
         self._lock = threading.Lock()
+        self._epoch_lock = threading.Lock()
         self._head = self._read_head()
 
     # -- writing ---------------------------------------------------------
@@ -85,7 +86,12 @@ class RecordStore:
                 payload, report = redact_bytes(payload)
             subject = payload_subject or event.subject_keys[0]
             ref = content_hash(payload)
-            epoch = self._keystore.epoch(subject)
+            # Read the epoch and seal under one lock. Sampling it first would
+            # let a forget land in the window, so the event would record a
+            # stale epoch and its payload -- sealed under the live key -- would
+            # read back as forgotten.
+            self._epoch_lock.acquire()
+            epoch = self.current_epoch(subject)
             event = event.with_payload(ref)
             event = Event.from_dict(
                 {**event.to_dict(), "meta": {**event.meta, "payload_epoch": epoch}}
@@ -94,8 +100,11 @@ class RecordStore:
                 event = Event.from_dict(
                     {**event.to_dict(), "meta": {**event.meta, "payload_subject": payload_subject}}
                 )
-            sealed = self._keystore.seal(subject, payload, aad=event.payload_aad(subject))
-            self._write_blob(ref, subject, epoch, sealed)
+            try:
+                sealed = self._keystore.seal(subject, payload, aad=event.payload_aad(subject))
+                self._write_blob(ref, subject, epoch, sealed)
+            finally:
+                self._epoch_lock.release()
 
         if report is not None and report.redacted:
             meta = dict(event.meta)
@@ -131,6 +140,36 @@ class RecordStore:
         tmp.write_bytes(subject.encode("utf-8") + b"\0" + sealed.to_bytes())
         tmp.replace(path)
 
+    def _namespace(self, subject: str) -> Path:
+        return self.blobs / hashlib.blake2b(subject.encode(), digest_size=8).hexdigest()
+
+    def _epoch_path(self, subject: str) -> Path:
+        return self._namespace(subject) / "EPOCH"
+
+    def current_epoch(self, subject: str) -> int:
+        """Which generation of this subject's key the blobs on disk belong to.
+
+        Durable, and owned by the store rather than the keystore, for two
+        reasons the review found the hard way: held in process memory it reset
+        on restart and the dedup then reused a blob sealed under the previous
+        run's destroyed key; and reading it must never create a key, or a
+        single read would resurrect a subject the user asked to erase.
+        """
+        try:
+            return int(self._epoch_path(subject).read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return 1
+
+    def _bump_epoch(self, subject: str) -> int:
+        with self._epoch_lock:
+            nxt = self.current_epoch(subject) + 1
+            path = self._epoch_path(subject)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f"EPOCH.{os.getpid()}.tmp")
+            tmp.write_text(str(nxt), encoding="utf-8")
+            tmp.replace(path)
+            return nxt
+
     def _blob_path(self, ref: str, subject: str, epoch: int) -> Path:
         """Blobs are namespaced per subject **and key epoch**.
 
@@ -141,8 +180,7 @@ class RecordStore:
         already-forgotten event readable again.
         """
         digest = ref.split(":", 1)[1]
-        namespace = hashlib.blake2b(subject.encode(), digest_size=8).hexdigest()
-        return self.blobs / namespace / f"e{epoch}" / digest[:2] / digest
+        return self._namespace(subject) / f"e{epoch}" / digest[:2] / digest
 
     # -- reading ---------------------------------------------------------
 
@@ -171,7 +209,7 @@ class RecordStore:
             raise ValueError(f"event {event.id} carries no payload")
         subject = str(event.meta.get("payload_subject") or event.subject_keys[0])
         epoch = int(event.meta.get("payload_epoch", 1))
-        if epoch < self._keystore.epoch(subject):
+        if epoch < self.current_epoch(subject):
             # The key that sealed this is gone. Say so precisely rather than
             # letting it surface as an authentication failure, which would be
             # indistinguishable from tampering.
@@ -187,6 +225,8 @@ class RecordStore:
         For projections that must keep working across a forget -- audit, and
         any listing that shows *that* something happened without its content.
         """
+        if event.payload_ref is None:
+            return None  # nothing to read; policy decisions carry no payload
         try:
             return self.payload(event)
         except (SubjectForgotten, FileNotFoundError):
@@ -235,4 +275,10 @@ class RecordStore:
         derived artefacts -- embeddings, summaries, learned skills (docs/11 §6)
         -- which is why this returns rather than pretending to be complete.
         """
-        return self._keystore.forget(subject)
+        forgotten = self._keystore.forget(subject)
+        if forgotten:
+            # Bump the epoch so a later write of identical content gets its own
+            # blob rather than re-sealing the shared one and un-forgetting the
+            # old event.
+            self._bump_epoch(subject)
+        return forgotten
