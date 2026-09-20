@@ -151,10 +151,30 @@ which ones are genuinely judgments.**
 
 ## Implementation contract
 
-Every entry is registered as a `DecisionPoint` with: a stable `id`, the option set, the state
-schema, the deterministic fallback, an escalation target, and a calibration bucket. The
-registry is the single place the catalog becomes code, so §"What was rejected" stays enforced:
-**a decision point that cannot name its fallback cannot be registered.**
+**44 entries here. 33 are registered as a `DecisionPoint`; 11 are not, and say why.**
+`decide/catalog.py` carries both lists — `CATALOG_IDS` maps each registered entry's ID to its
+point, `NOT_DECISION_POINTS` names each exclusion and its reason — and
+`tests/test_decide.py` **reads this file** and fails if an ID here appears in neither. An
+entry cannot quietly go unimplemented, and an exclusion cannot quietly become a place to put
+the inconvenient: only three reasons are accepted.
+
+A registered point carries a stable `id`, the option set, the state schema, the deterministic
+fallback, an escalation target, and a calibration bucket. The registry is the single place the
+catalog becomes code, so §"What was rejected" stays enforced: **a decision point that cannot
+name its fallback cannot be registered.**
+
+### The 11 that are not decision points
+
+| Why | Entries | The distinction |
+|---|---|---|
+| **Ranking** | A6, B6, C5, C6, D7, E6 | A `DecisionPoint` needs two or more *named* options and a deterministic fallback among them. A rank has neither — and, decisively, **admission test 3 fails**: there is no "more conservative option" to escalate a low-confidence ranking to. Reranking is still worth doing with a cheap model; it is just not this mechanism, and pretending otherwise would put six uncalibratable things in the calibration log. |
+| **Compound output** | B1 | Event categorisation emits a kind *and* `subject_keys`. Two answers, so two points or none; today the kind comes from the source adapter and `subject_keys` from the router, both deterministically. |
+| **Deployment-scoped options** | C1, E4, E8, F2 | The option set is whatever this deployment has — registered capability classes, real subsystems, present nodes. Registered at startup from the live registry rather than frozen in the catalog, so the static list would be a lie. |
+
+This split is the useful part of doing the exercise. "Everywhere a decision model earns its
+keep" turned out to include six places where what is actually wanted is a **score**, which is
+a different tool with a different failure mode: a bad rank puts the right answer second, a bad
+classification takes the wrong branch.
 
 Calibration is tracked **per `id`** — E5 and D6 will calibrate very differently — and a point
 whose reliability diagram goes bad is demoted to its fallback automatically, with a notice.

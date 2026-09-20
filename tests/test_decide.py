@@ -1,10 +1,14 @@
 """The decision layer: fallbacks, escalation, the rule factory, calibration."""
+import re
+from pathlib import Path
+
 import pytest
 
 from jarvis_core.decide import (
     CalibrationLog, DecisionPoint, DecisionRegistry, DecisionSource,
     FallbackDecider, STANDARD_POINTS,
 )
+from jarvis_core.decide.catalog import CATALOG_IDS, NOT_DECISION_POINTS
 from jarvis_core.errors import PolicyDenied
 
 
@@ -178,6 +182,52 @@ class TestStandardCatalog:
     def test_autonomy_proposal_falls_back_to_the_most_restrictive_class(self):
         point = next(p for p in STANDARD_POINTS if p.id == "safety.autonomy_proposal")
         assert point.fallback == "A4" and point.escalate_to == "A4"
+
+
+class TestTheDocIsTheContract:
+    """docs/20 says "every entry is registered as a DecisionPoint". It said
+    that while listing 44 entries against 24 registered ones, which is how a
+    contract becomes a wish. This reads the doc."""
+
+    DOC = Path(__file__).resolve().parents[1] / "docs" / "20-DECISION-CATALOG.md"
+
+    def doc_ids(self) -> set[str]:
+        return set(re.findall(r"^\| ([A-G]\d+) \|", self.DOC.read_text(), re.M))
+
+    def test_the_doc_lists_what_we_think_it_lists(self):
+        """A guard against the guard: if the tables stop parsing, everything
+        below passes vacuously."""
+        assert len(self.doc_ids()) >= 40
+
+    def test_every_documented_entry_is_registered_or_explicitly_excluded(self):
+        accounted = set(CATALOG_IDS) | set(NOT_DECISION_POINTS)
+        missing = self.doc_ids() - accounted
+        assert not missing, (
+            f"docs/20 lists {sorted(missing)} with no registered point and no "
+            "reason for being excluded. Register it, or say in "
+            "NOT_DECISION_POINTS why it is not a bounded choice."
+        )
+
+    def test_nothing_is_claimed_that_the_doc_does_not_list(self):
+        stale = (set(CATALOG_IDS) | set(NOT_DECISION_POINTS)) - self.doc_ids()
+        assert not stale, f"{sorted(stale)} no longer appear in docs/20"
+
+    def test_an_entry_is_registered_or_excluded_but_not_both(self):
+        assert not set(CATALOG_IDS) & set(NOT_DECISION_POINTS)
+
+    def test_every_mapped_id_resolves_to_a_real_point(self):
+        registered = {point.id for point in STANDARD_POINTS}
+        assert set(CATALOG_IDS.values()) == registered
+
+    def test_every_exclusion_gives_a_reason(self):
+        assert all(reason.strip() for reason in NOT_DECISION_POINTS.values())
+
+    def test_the_exclusions_are_the_shapes_the_type_cannot_hold(self):
+        """Ranking, compound output, deployment-scoped options -- and nothing
+        else. "Excluded" must not become a place to put the inconvenient."""
+        allowed = {"ranking", "compound", "deployment-scoped"}
+        for doc_id, reason in NOT_DECISION_POINTS.items():
+            assert reason.split(":")[0] in allowed, f"{doc_id}: {reason}"
 
 
 class TestCalibration:

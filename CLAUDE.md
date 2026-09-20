@@ -9,6 +9,8 @@ A personal AI operating layer. **One identity, many hands.**
    why it was taken, and what evidence would reverse it. D1–D18.
 3. `docs/05-ARCHITECTURE.md` — layers and contracts.
 4. `docs/20-DECISION-CATALOG.md` — where the decision layer is and isn't used.
+   44 entries: 33 registered, 11 that are rankings, compound or deployment-scoped.
+   `tests/test_decide.py` reads that doc, so the split cannot drift.
 
 ## The invariant that matters most
 
@@ -86,7 +88,7 @@ src/jarvis_core/
 ## Commands
 
 ```bash
-python3 -m pytest -q          # 374 tests, ~1.4s
+python3 -m pytest -q          # 381 tests, ~1.4s
 python3 -m pytest tests/test_invariants.py    # the vendor-freedom check
 python3 tools/mutation_sweep.py               # break each guard; see if a test notices
 ```

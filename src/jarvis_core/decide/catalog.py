@@ -52,6 +52,17 @@ PROMOTION = DecisionPoint(
     escalate_to="hold",
     description="Has this routine earned more autonomy?",
 )
+BUDGET_PRESSURE = DecisionPoint(
+    id="proactivity.budget_pressure",
+    options=("spend", "degrade", "drop"),
+    fallback="degrade",
+    escalate_to="degrade",
+    description=(
+        "The interrupt budget is nearly gone and something wants it. Degrading "
+        "still tells the user, in a cheaper modality; dropping does not, and an "
+        "unsure system should not be the one deciding they need not know."
+    ),
+)
 
 # -- B. Record and memory ------------------------------------------------
 RETENTION = DecisionPoint(
@@ -84,6 +95,28 @@ MEMORY_CONFLICT = DecisionPoint(
     fallback="ask",
     escalate_to="ask",
     description="A new fact contradicts a stored one.",
+)
+SKILL_DRAFT_TRIAGE = DecisionPoint(
+    id="record.skill_draft_triage",
+    options=("extract", "skip"),
+    fallback="skip",
+    escalate_to="skip",
+    description=(
+        "Is this execution trace worth extracting into a SKILL.md draft? Skips "
+        "when unsure: a learned skill that misfires when a parameter changes is "
+        "worse than no skill (docs/05 §4.1)."
+    ),
+)
+RECALL_PLANNING = DecisionPoint(
+    id="record.recall_planning",
+    options=("none", "project", "recent", "archive"),
+    fallback="project",
+    escalate_to="project",
+    description=(
+        "How far should this recall reach? A *proposal* only -- the scope is "
+        "granted by a RecallAuthority, never by the asker. Unsure pulls back to "
+        "the narrow default rather than reaching for the archive."
+    ),
 )
 
 # -- C. Routing and policy (D17) -----------------------------------------
@@ -138,6 +171,27 @@ FLAKE = DecisionPoint(
     escalate_to="real",
     description="Flake or real failure? 'Flake' is never the safe guess.",
 )
+REVIEWER_PERSONA = DecisionPoint(
+    id="devloop.reviewer_persona",
+    options=("senior", "security", "ops"),
+    fallback="senior",
+    escalate_to="security",
+    description=(
+        "Which reviewer does this change deserve? Unsure gets the strictest, "
+        "because the cost of the wrong answer is asymmetric."
+    ),
+)
+STOP_SIGNAL = DecisionPoint(
+    id="devloop.stop_signal",
+    options=("continue", "stop"),
+    fallback="continue",
+    escalate_to="continue",
+    description=(
+        "Has the review loop converged? Continues to the cap when unsure. "
+        "Stopping early on a low-confidence 'looks done' is how a real finding "
+        "survives (D19: circling is itself a signal, and a human reads it)."
+    ),
+)
 
 # -- E. The Timeless Codebase (docs/19) ----------------------------------
 BISECT_RANK = DecisionPoint(
@@ -171,6 +225,17 @@ DRIFT = DecisionPoint(
     escalate_to="drifted",
     description="Does the code still match the decision that authorized it?",
 )
+CHANGE_INTENT = DecisionPoint(
+    id="history.change_intent",
+    options=("feature", "fix", "refactor", "perf", "docs", "revert", "risky"),
+    fallback="risky",
+    escalate_to="risky",
+    description=(
+        "What kind of change is this, for the historical index? Commit messages "
+        "lie and conventions drift. Over-classifying as risky costs review time; "
+        "under-classifying loses the change in the archive."
+    ),
+)
 
 # -- F. Voice and presence -----------------------------------------------
 ADDRESSED = DecisionPoint(
@@ -186,6 +251,13 @@ BARGE_IN = DecisionPoint(
     fallback="stop",
     escalate_to="stop",
     description="What did the interruption mean? 'Stop' is always the safe reading.",
+)
+INTENT_AMBIGUITY = DecisionPoint(
+    id="voice.intent_ambiguity",
+    options=("proceed", "clarify"),
+    fallback="clarify",
+    escalate_to="clarify",
+    description="Ask or proceed? An unsure system asks. That is the whole point.",
 )
 
 # -- G. Safety and health ------------------------------------------------
@@ -207,12 +279,85 @@ AUTONOMY_PROPOSAL = DecisionPoint(
     ),
 )
 
+HEALTH_DEGRADATION = DecisionPoint(
+    id="safety.health_degradation",
+    options=("real", "transient"),
+    fallback="real",
+    escalate_to="real",
+    description=(
+        "Is this backend degradation real or a blip? Treating a real outage as "
+        "transient keeps routing traffic into it."
+    ),
+)
+ANOMALY = DecisionPoint(
+    id="safety.anomaly",
+    options=("normal", "unusual"),
+    fallback="normal",
+    escalate_to="unusual",
+    description=(
+        "Is this run unlike our own history? Fallback is normal-and-logged, "
+        "because flagging everything is the same as flagging nothing -- but an "
+        "unsure answer surfaces, since the point is to catch what we did not "
+        "think to look for."
+    ),
+)
+
+#: docs/20 ID -> registered point id. The doc's implementation contract says
+#: every entry becomes a ``DecisionPoint``; this is what makes that checkable
+#: rather than asserted, and ``tests/test_decide.py`` reads the doc and holds
+#: the two together.
+CATALOG_IDS: dict[str, str] = {
+    "A1": "proactivity.salience", "A2": "proactivity.modality",
+    "A3": "proactivity.interruptibility", "A4": "proactivity.trigger_triage",
+    "A5": "proactivity.promotion", "A7": "proactivity.budget_pressure",
+    "B2": "record.retention", "B3": "record.consolidation",
+    "B4": "record.skill_draft_triage", "B5": "record.recall_planning",
+    "B7": "record.forget_fanout", "B8": "record.memory_conflict",
+    "C2": "routing.tier_adequacy", "C3": "routing.policy_parse",
+    "C4": "routing.policy_conflict",
+    "D1": "session.attention", "D2": "devloop.depth",
+    "D3": "devloop.reviewer_persona", "D4": "devloop.finding_triage",
+    "D5": "devloop.stop_signal", "D6": "devloop.flake",
+    "E1": "history.bisect_rank", "E2": "history.regression_dedupe",
+    "E3": "history.change_intent", "E5": "history.supersession",
+    "E7": "history.drift",
+    "F1": "voice.addressed", "F3": "voice.barge_in",
+    "F4": "voice.intent_ambiguity",
+    "G1": "safety.ingest_triage", "G2": "safety.autonomy_proposal",
+    "G3": "safety.health_degradation", "G4": "safety.anomaly",
+}
+
+#: docs/20 entries that are **not** decision points, with the reason. Listed
+#: rather than quietly absent: an entry missing from both this and
+#: ``CATALOG_IDS`` is drift between the doc and the code, and the test says so.
+NOT_DECISION_POINTS: dict[str, str] = {
+    "A6": "ranking: ordering a digest is scoring, not a bounded choice",
+    "B6": "ranking: which 12 of 500 is a score over candidates",
+    "C5": "ranking: over the eligible backends, which the registry supplies",
+    "C6": "ranking: over the healthy backends, same shape as C5",
+    "D7": "ranking: which of several blocked sessions leads the summary",
+    "E6": "ranking: which prior version is the best reference",
+    "B1": "compound: emits a kind *and* subject_keys, not one bounded choice",
+    "C1": "deployment-scoped: options are the registered capability classes",
+    "E4": "deployment-scoped: options are this deployment's subsystems",
+    "E8": "deployment-scoped: same subsystem set as E4",
+    "F2": "deployment-scoped: options are the nodes that are actually present",
+}
+"""A ranking is not a ``DecisionPoint``: the type requires at least two *named*
+options and a deterministic fallback among them, and a rank has neither. That
+is a real distinction rather than a limitation to work around -- a bounded
+choice can be escalated to a more conservative option when confidence is low,
+and a rank cannot, so admission test 3 (docs/20) fails for all six."""
+
 STANDARD_POINTS: tuple[DecisionPoint, ...] = (
     SALIENCE, MODALITY, INTERRUPTIBILITY, TRIGGER_TRIAGE, PROMOTION,
+    BUDGET_PRESSURE,
     RETENTION, CONSOLIDATION, FORGET_FANOUT, MEMORY_CONFLICT,
+    SKILL_DRAFT_TRIAGE, RECALL_PLANNING,
     TIER_ADEQUACY, POLICY_PARSE, POLICY_CONFLICT,
     SESSION_ATTENTION, LOOP_DEPTH, FINDING_TRIAGE, FLAKE,
-    BISECT_RANK, REGRESSION_DEDUPE, SUPERSESSION, DRIFT,
-    ADDRESSED, BARGE_IN,
-    INGEST_TRIAGE, AUTONOMY_PROPOSAL,
+    REVIEWER_PERSONA, STOP_SIGNAL,
+    BISECT_RANK, REGRESSION_DEDUPE, SUPERSESSION, DRIFT, CHANGE_INTENT,
+    ADDRESSED, BARGE_IN, INTENT_AMBIGUITY,
+    INGEST_TRIAGE, AUTONOMY_PROPOSAL, HEALTH_DEGRADATION, ANOMALY,
 )
