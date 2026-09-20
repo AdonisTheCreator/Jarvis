@@ -155,13 +155,25 @@ class Event:
     def is_media(self) -> bool:
         return self.kind in MEDIA_KINDS
 
-    def aad(self) -> bytes:
-        """Additional authenticated data binding a payload to this event.
+    def payload_aad(self, subject: str) -> bytes:
+        """Additional authenticated data for this event's sealed payload.
 
-        Includes the payload ref so a sealed blob cannot be swapped for another
-        one belonging to the same subject.
+        Binds the ciphertext to **(subject, content ref)** rather than to the
+        event id, which is a deliberate layering choice:
+
+        * the **hash chain** already binds *event -> payload_ref*, so pointing
+          an event at a different blob breaks verification;
+        * the **AAD** binds *payload_ref -> subject*, so one subject's blob can
+          never be unsealed as another's.
+
+        Binding the AAD to the event id instead would make content addressing
+        useless (identical payloads would seal differently per event) and --
+        worse -- a blob shared between two subjects would survive one of them
+        being forgotten. Subject-scoped sealing closes that hole.
         """
-        return f"{self.id}|{self.kind.value}|{self.payload_ref or ''}".encode()
+        if self.payload_ref is None:
+            raise ValueError(f"event {self.id} has no payload to bind")
+        return f"{subject}|{self.payload_ref}".encode()
 
     def with_payload(self, payload_ref: str) -> Event:
         """Return a copy carrying ``payload_ref``. Used before sealing."""

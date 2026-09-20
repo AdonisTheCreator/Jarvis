@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import threading
 import time
 from typing import Final
 
@@ -34,15 +35,56 @@ def _encode_crockford(data: bytes, length: int) -> str:
     return "".join(reversed(out))
 
 
-def new_ulid(when_ms: int | None = None) -> str:
-    """Return a fresh ULID.
+_MAX_RAND: Final[int] = (1 << (_RAND_BYTES * 8)) - 1
 
-    ``when_ms`` is injectable so tests can pin ordering without sleeping.
+_state_lock = threading.Lock()
+_last_ms: int = -1
+_last_rand: int = 0
+_last_auto_ms: int = 0
+
+
+def new_ulid(when_ms: int | None = None) -> str:
+    """Return a fresh, **monotonic** ULID.
+
+    Plain ULIDs only sort by time across *milliseconds*; within one, the random
+    component decides order arbitrarily. The Record relies on id order being
+    write order -- ``scan`` walks it, ``checkpoint`` compares against it -- and
+    a busy moment puts many events in the same millisecond, so the naive
+    version silently shuffles them.
+
+    Monotonicity per the ULID spec: within a millisecond, increment the random
+    component instead of redrawing it. Two ids from the same millisecond then
+    still compare in creation order.
+
+    ``when_ms`` is injectable so tests can pin timestamps; a pinned value is
+    honoured exactly. Auto-generated timestamps additionally never go backwards,
+    so an NTP correction cannot make the log appear to regress.
     """
-    ms = int(time.time() * 1000) if when_ms is None else when_ms
-    if ms < 0:
-        raise ValueError("timestamp must not be negative")
-    payload = ms.to_bytes(_TIME_BYTES, "big") + os.urandom(_RAND_BYTES)
+    global _last_ms, _last_rand, _last_auto_ms
+
+    with _state_lock:
+        if when_ms is None:
+            ms = max(int(time.time() * 1000), _last_auto_ms)
+            _last_auto_ms = ms
+        else:
+            ms = when_ms
+        if ms < 0:
+            raise ValueError("timestamp must not be negative")
+
+        if ms == _last_ms:
+            if _last_rand >= _MAX_RAND:
+                # 2^80 ids in one millisecond is not a real scenario, but
+                # rolling into the next millisecond keeps the guarantee total.
+                ms += 1
+                _last_rand = int.from_bytes(os.urandom(_RAND_BYTES), "big")
+            else:
+                _last_rand += 1
+        else:
+            _last_rand = int.from_bytes(os.urandom(_RAND_BYTES), "big")
+        _last_ms = ms
+        randomness = _last_rand
+
+    payload = ms.to_bytes(_TIME_BYTES, "big") + randomness.to_bytes(_RAND_BYTES, "big")
     return _encode_crockford(payload, ULID_LENGTH)
 
 

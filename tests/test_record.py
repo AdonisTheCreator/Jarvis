@@ -28,6 +28,31 @@ class TestIds:
         assert content_hash(b"a") == content_hash(b"a")
         assert content_hash(b"a") != content_hash(b"b")
 
+    def test_ids_are_monotonic_within_a_single_millisecond(self):
+        """Plain ULIDs only sort across milliseconds; a busy moment shuffles
+        them, and the Record relies on id order being write order."""
+        batch = [new_ulid(42_000) for _ in range(200)]
+        assert batch == sorted(batch)
+        assert len(set(batch)) == 200
+
+    def test_ids_are_unique_under_concurrency(self):
+        import threading
+
+        produced: list[str] = []
+        lock = threading.Lock()
+
+        def work() -> None:
+            ids = [new_ulid() for _ in range(300)]
+            with lock:
+                produced.extend(ids)
+
+        threads = [threading.Thread(target=work) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(set(produced)) == 2400
+
 
 class TestEventSchema:
     def test_subject_keys_are_mandatory(self):
@@ -128,6 +153,18 @@ class TestRecordStore:
         store.append(evt(kind=EventKind.POLICY_WRITE))
         kinds = [s.event.kind for s in store.scan(kinds=[EventKind.POLICY_WRITE])]
         assert kinds == [EventKind.POLICY_WRITE]
+
+    def test_same_payload_under_two_subjects_stays_isolated(self, store: RecordStore):
+        """Sharing a content-addressed blob across subjects would mean one
+        subject's forget leaves another's copy readable. That is a leak, not a
+        saving, so blobs are namespaced per subject."""
+        mine = store.append(evt(subject_keys=["project:jarvis"]), b"identical text")
+        theirs = store.append(evt(subject_keys=["person:guest"]), b"identical text")
+        assert store.payload(mine.event) == store.payload(theirs.event) == b"identical text"
+
+        store.forget_subject("person:guest")
+        assert store.payload_or_none(theirs.event) is None
+        assert store.payload(mine.event) == b"identical text"  # unaffected
 
     def test_reopening_continues_the_chain(self, store: RecordStore, keystore):
         store.append(evt(), b"first")

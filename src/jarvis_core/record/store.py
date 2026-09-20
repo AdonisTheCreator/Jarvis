@@ -86,7 +86,11 @@ class RecordStore:
             subject = payload_subject or event.subject_keys[0]
             ref = content_hash(payload)
             event = event.with_payload(ref)
-            sealed = self._keystore.seal(subject, payload, aad=event.aad())
+            if payload_subject is not None and payload_subject != event.subject_keys[0]:
+                event = Event.from_dict(
+                    {**event.to_dict(), "meta": {**event.meta, "payload_subject": payload_subject}}
+                )
+            sealed = self._keystore.seal(subject, payload, aad=event.payload_aad(subject))
             self._write_blob(ref, subject, sealed)
 
         if report is not None and report.redacted:
@@ -109,7 +113,7 @@ class RecordStore:
             return StoredEvent(event=event, chain=chain)
 
     def _write_blob(self, ref: str, subject: str, sealed: Sealed) -> None:
-        path = self._blob_path(ref)
+        path = self._blob_path(ref, subject)
         if path.exists():
             return  # content-addressed: identical payload, already stored
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -117,9 +121,16 @@ class RecordStore:
         tmp.write_bytes(subject.encode("utf-8") + b"\0" + sealed.to_bytes())
         tmp.replace(path)
 
-    def _blob_path(self, ref: str) -> Path:
+    def _blob_path(self, ref: str, subject: str) -> Path:
+        """Blobs are namespaced per subject.
+
+        Content addressing dedupes *within* a subject, which is where the
+        repetition actually is. Sharing a blob across subjects would mean one
+        subject's forget leaves another's copy readable -- a leak, not a saving.
+        """
         digest = ref.split(":", 1)[1]
-        return self.blobs / digest[:2] / digest
+        namespace = hashlib.blake2b(subject.encode(), digest_size=8).hexdigest()
+        return self.blobs / namespace / digest[:2] / digest
 
     # -- reading ---------------------------------------------------------
 
@@ -146,10 +157,11 @@ class RecordStore:
         """
         if event.payload_ref is None:
             raise ValueError(f"event {event.id} carries no payload")
-        raw = self._blob_path(event.payload_ref).read_bytes()
-        subject, _, body = raw.partition(b"\0")
-        sealed = Sealed.from_bytes(subject.decode("utf-8"), body)
-        return self._keystore.unseal(sealed, aad=event.aad())
+        subject = str(event.meta.get("payload_subject") or event.subject_keys[0])
+        raw = self._blob_path(event.payload_ref, subject).read_bytes()
+        stored_subject, _, body = raw.partition(b"\0")
+        sealed = Sealed.from_bytes(stored_subject.decode("utf-8"), body)
+        return self._keystore.unseal(sealed, aad=event.payload_aad(stored_subject.decode("utf-8")))
 
     def payload_or_none(self, event: Event) -> bytes | None:
         """Like :meth:`payload`, but forgotten subjects read as ``None``.
