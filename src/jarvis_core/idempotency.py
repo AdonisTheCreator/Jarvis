@@ -83,6 +83,7 @@ class IdempotencyLedger:
 
     def __init__(self) -> None:
         self._states: dict[str, Claim] = {}
+        self._handles: dict[str, str] = {}
         self._lock = threading.Lock()
 
     def claim(self, key: str) -> Claim:
@@ -95,9 +96,28 @@ class IdempotencyLedger:
             self._states[key] = claim
             return Claim(key=key, state=ClaimState.FRESH)
 
+    def bind(self, key: str, handle_ref: str) -> None:
+        """Associate a backend handle with a claim.
+
+        Lives here rather than in the router because the ledger is the durable
+        side: an in-process map would be lost on restart while the claim it
+        described stayed IN_FLIGHT forever, blocking every retry.
+
+        ``handle_ref`` must be globally unique -- backends may mint colliding
+        local ids, and resolving one backend's handle to another's claim is how
+        polling B releases A.
+        """
+        with self._lock:
+            self._handles[handle_ref] = key
+
+    def key_for(self, handle_ref: str) -> str | None:
+        with self._lock:
+            return self._handles.get(handle_ref)
+
     def complete(self, key: str, result_ref: str | None = None) -> None:
         with self._lock:
             self._states[key] = Claim(key=key, state=ClaimState.DONE, result_ref=result_ref)
+            self._unbind(key)
 
     def release(self, key: str) -> None:
         """Abandon a claim after a failure that did *not* take effect.
@@ -110,6 +130,18 @@ class IdempotencyLedger:
             current = self._states.get(key)
             if current is not None and current.state is ClaimState.IN_FLIGHT:
                 del self._states[key]
+                self._unbind(key)
+
+    def _unbind(self, key: str) -> None:
+        """Drop every handle pointing at ``key``. Caller holds the lock.
+
+        Because keys hash the *action*, a retry shares its predecessor's key.
+        Leaving a dead handle bound would let a late poll on it settle the
+        retry's live claim -- and then a third attempt would duplicate the
+        side effect.
+        """
+        for handle_ref in [h for h, k in self._handles.items() if k == key]:
+            del self._handles[handle_ref]
 
     def in_flight(self) -> list[str]:
         """Keys still claimed but not completed.

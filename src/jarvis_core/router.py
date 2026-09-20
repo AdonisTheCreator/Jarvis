@@ -103,6 +103,16 @@ class Invocation:
         return self.claim.resolved
 
 
+def _handle_ref(backend: AgentBackend, handle: TaskHandle) -> str:
+    """Globally unique handle reference.
+
+    Backends are free to mint local ids like ``"job-1"``. Keying claim
+    bindings on the bare id lets two backends collide, so polling one
+    backend's handle releases another's claim.
+    """
+    return f"{backend.id}:{handle.id}"
+
+
 def _actor_of(actor: str) -> Actor:
     """Map a request actor string onto the Record's coarse actor enum.
 
@@ -134,15 +144,6 @@ class CapabilityRouter:
         self._record = record
         self._idempotency = idempotency or IdempotencyLedger()
         self._backends: list[AgentBackend] = []
-        self._claims_by_handle: dict[str, str] = {}
-        """handle id -> idempotency key, for the claims *this router* issued.
-
-        The router is what took the claim, so it is the authority on whether a
-        handle has one. Depending on the adapter to echo the key made the two
-        cases indistinguishable -- a read-only task and a side-effecting task
-        whose adapter simply did not echo -- and the second one silently
-        stranded the claim.
-        """
 
     def register_backend(self, backend: AgentBackend) -> None:
         self._backends.append(backend)
@@ -185,10 +186,23 @@ class CapabilityRouter:
         """
         actor = _actor_of(request.actor)
 
-        # 0. A mismatched task is a caller bug, not a policy question. Checking
-        #    it first keeps the trail clean: otherwise an allow is written and
-        #    then nothing follows it.
-        task = self._task_for(request, task)
+        # 0. A mismatched task is a caller bug, not a policy question -- but the
+        #    attempt is still recorded as a refusal. Raising silently would let
+        #    any caller suppress the audit trail of its own probing by attaching
+        #    a mismatched task.
+        try:
+            task = self._task_for(request, task)
+        except TaskMismatch as exc:
+            self._record_decision(
+                request,
+                Decision(
+                    outcome=Outcome.DENY,
+                    reason=f"task does not match the request: {exc}",
+                    capability=request.capability,
+                ),
+                actor,
+            )
+            raise
 
         # 1. Policy decides -- including on unknown capabilities, which it fails
         #    closed on. Looking the capability up first would turn a documented
@@ -260,7 +274,7 @@ class CapabilityRouter:
             raise
 
         if key is not None:
-            self._claims_by_handle[handle.id] = key
+            self._idempotency.bind(key, _handle_ref(backend, handle))
         state = self._state_of(backend, handle)
         outcome = self._settle_claim(key, state, handle)
         # ``state is None`` means status() raised: we do not know what happened,
@@ -297,50 +311,49 @@ class CapabilityRouter:
             claim=outcome,
         )
 
-    def settle(
-        self,
-        backend: AgentBackend,
-        handle: TaskHandle,
-        idempotency_key: str | None = None,
-    ) -> ClaimOutcome:
+    def settle(self, invocation: Invocation, backend: AgentBackend) -> ClaimOutcome:
         """Resolve an in-flight claim for an asynchronous task.
+
+        Takes the :class:`Invocation` rather than a bare handle, deliberately.
+        The invocation knows the key *and* whether one applies, so the two
+        cases a handle cannot distinguish -- read-only work, and side-effecting
+        work whose claim binding was lost -- stay distinguishable. An earlier
+        handle-only signature was the source of every ambiguity in this method.
 
         A queued effect that later fails must not stay recorded as done, or the
         legitimate retry is suppressed and the message is never sent. Callers
-        poll this until it returns True.
-
-        The key is resolved from the router's own record of the claim it
-        issued, falling back to an explicit argument or one the adapter echoed
-        on the handle. Disagreement between any two is refused rather than
-        guessed, since settling one action off another's status would mark a
-        send DONE that never happened.
+        poll while the outcome is ``PENDING``.
         """
-        known = self._claims_by_handle.get(handle.id)
-        echoed = handle.idempotency_key
-        for label, candidate in (("router record", known), ("handle", echoed)):
-            if idempotency_key is not None and candidate is not None and idempotency_key != candidate:
-                # A transposed pair would settle one action off another's
-                # status, marking a send DONE that never happened.
-                raise ValueError(
-                    f"idempotency key {idempotency_key[:12]}… disagrees with the {label} for "
-                    f"handle {handle.id} ({candidate[:12]}…); refusing to settle the wrong claim"
-                )
-        key = known or idempotency_key or echoed
-        if key is None:
-            # Either read-only, or a handle this router never issued. Nothing to
-            # settle is a valid answer, so a generic poll loop does not crash on
-            # the first non-side-effecting handle.
+        if invocation.idempotency_key is None:
             return ClaimOutcome.NOT_APPLICABLE
-        outcome = self._settle_claim(key, self._state_of(backend, handle), handle)
-        if outcome in {ClaimOutcome.COMPLETED, ClaimOutcome.RELEASED}:
-            self._claims_by_handle.pop(handle.id, None)
-        return outcome
+        if invocation.handle is None:
+            raise ValueError("cannot settle an invocation that never produced a handle")
+        if invocation.backend_id != backend.id:
+            raise ValueError(
+                f"invocation ran on {invocation.backend_id!r}, not {backend.id!r}; "
+                "refusing to settle a claim against the wrong backend"
+            )
+        bound = self._idempotency.key_for(_handle_ref(backend, invocation.handle))
+        if bound is None:
+            # The claim was already completed or released; the binding went with
+            # it. Settling again would resolve a *later* attempt sharing the key.
+            return ClaimOutcome.NOT_APPLICABLE
+        if bound != invocation.idempotency_key:
+            raise ValueError(
+                "handle is bound to a different claim than this invocation; "
+                "refusing to settle the wrong action"
+            )
+        return self._settle_claim(
+            bound, self._state_of(backend, invocation.handle), invocation.handle
+        )
 
-    def stuck_claims(self) -> list[str]:
-        """Idempotency keys held but unresolved -- work in flight, or stuck.
+    def outstanding_claims(self) -> list[str]:
+        """Idempotency keys held but unresolved.
 
-        Either way they block the retry, so they must be visible rather than
-        silently permanent.
+        Named honestly: this is *everything* in flight, which includes healthy
+        work still running as well as genuinely stuck claims. Calling it
+        "stuck" would invite an operator to release a live claim, and the
+        action would then run twice.
         """
         return self._idempotency.in_flight()
 

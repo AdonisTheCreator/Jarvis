@@ -6,6 +6,7 @@ from jarvis_core.backend import (
     AgentBackend, Estimate, HealthStatus, Task, TaskHandle, TaskState, TaskStatus,
 )
 from jarvis_core.capability import Capability, CapabilityRegistry
+from jarvis_core.idempotency import IdempotencyLedger
 from jarvis_core.errors import ApprovalRequired, PolicyDenied
 from jarvis_core.ids import new_ulid
 from jarvis_core.policy import PolicyEngine, Request
@@ -298,23 +299,23 @@ class TestSecondReviewFindings:
         router.register_backend(backend)
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
         assert result.claim is ClaimOutcome.PENDING
-        assert router.settle(backend, result.handle) is ClaimOutcome.PENDING
-        assert result.idempotency_key in router.stuck_claims()
+        assert router.settle(result, backend) is ClaimOutcome.PENDING
+        assert result.idempotency_key in router.outstanding_claims()
 
     def test_settle_is_a_no_op_for_read_only_work(self, router):
         """A generic poll loop must not crash on the first read-only handle."""
         result = router.invoke(Request("ci.read_status", "repo"))
         backend = next(b for b in router._backends if b.id == "primary")
-        assert router.settle(backend, result.handle) is ClaimOutcome.NOT_APPLICABLE
+        assert router.settle(result, backend) is ClaimOutcome.NOT_APPLICABLE
 
-    def test_a_transposed_key_is_refused_rather_than_guessed(self, registry, engine, store):
+    def test_settle_refuses_the_wrong_backend(self, registry, engine, store):
         router = CapabilityRouter(registry, engine, store)
-        backend = FakeBackend("primary", ["ci.rerun_job"])
-        router.register_backend(backend)
-        first = router.invoke(Request("ci.rerun_job", "a", {"job_id": "a"}))
-        second = router.invoke(Request("ci.rerun_job", "b", {"job_id": "b"}))
-        with pytest.raises(ValueError, match="refusing to settle the wrong claim"):
-            router.settle(backend, first.handle, second.idempotency_key)
+        a = FakeBackend("alpha", ["ci.rerun_job"])
+        b = FakeBackend("beta", ["ci.rerun_job"])
+        router.register_backend(a)
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        with pytest.raises(ValueError, match="wrong backend"):
+            router.settle(result, b)
 
     def test_interrupted_is_terminal_so_polling_terminates(self, registry, engine, store):
         class Interrupted(FakeBackend):
@@ -326,7 +327,7 @@ class TestSecondReviewFindings:
         router.register_backend(backend)
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
         assert result.claim is ClaimOutcome.STUCK and result.settled is True
-        assert result.idempotency_key in router.stuck_claims()
+        assert result.idempotency_key in router.outstanding_claims()
         # The claim stays in flight: an interrupted effect may have partly landed.
         with pytest.raises(DuplicateSuppressed):
             router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
@@ -374,25 +375,91 @@ class TestThirdReviewFindings:
         assert errors[0].meta["effect_uncertain"] is True
         assert errors[0].meta["state"] == "unknown"
 
-    def test_a_mismatched_task_leaves_no_dangling_allow(self, router, store: RecordStore):
-        """An allow with no outcome and no error breaks the trail's meaning."""
+    def test_a_mismatched_task_is_recorded_as_a_refusal(self, router, store: RecordStore):
+        """Neither a dangling allow nor silence: a caller must not be able to
+        suppress the trail of its own probing by attaching a bad task."""
         with pytest.raises(TaskMismatch):
             router.invoke(
                 Request("ci.rerun_job", "j", {"job_id": "j"}),
                 Task("ci.rerun_job", "j", {"job_id": "other"}),
             )
-        assert list(store.scan()) == []  # nothing recorded at all
+        decisions = [s.event for s in store.scan(kinds=[EventKind.POLICY_DECISION])]
+        assert len(decisions) == 1
+        assert decisions[0].meta["outcome"] == "deny"
+        assert "does not match" in decisions[0].meta["reason"]
+        assert [s.event for s in store.scan(kinds=[EventKind.CAPABILITY_INVOKE])] == []
 
-    def test_stuck_claims_are_enumerable(self, registry, engine, store):
+    def test_outstanding_claims_are_enumerable(self, registry, engine, store):
         class Interrupted(FakeBackend):
             def status(self, handle):
                 return TaskStatus(handle=handle, state=TaskState.INTERRUPTED)
 
         router = CapabilityRouter(registry, engine, store)
         router.register_backend(Interrupted("stopped", ["ci.rerun_job"]))
-        assert router.stuck_claims() == []
+        assert router.outstanding_claims() == []
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
-        assert router.stuck_claims() == [result.idempotency_key]
+        assert router.outstanding_claims() == [result.idempotency_key]
+
+
+class TestFourthReviewFindings:
+    """Regression coverage for the fourth round -- all one root cause."""
+
+    def test_a_stale_handle_cannot_settle_a_later_retry(self, registry, engine, store):
+        """Keys hash the action, so a retry shares its predecessor's key. A
+        dead handle left bound would release the retry's live claim, and a
+        third attempt would duplicate the side effect."""
+        class Failing(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.FAILED)
+
+        router = CapabilityRouter(registry, engine, store)
+        backend = Failing("primary", ["ci.rerun_job"])
+        router.register_backend(backend)
+        request = Request("ci.rerun_job", "j", {"job_id": "j"})
+
+        first = router.invoke(request)          # fails -> claim released
+        assert first.claim is ClaimOutcome.RELEASED
+        second = router.invoke(request)         # legitimate retry
+        # Settling the *dead* handle must not touch the live retry's claim.
+        assert router.settle(first, backend) is ClaimOutcome.NOT_APPLICABLE
+        assert second.idempotency_key is not None
+
+    def test_handles_are_namespaced_by_backend(self, registry, engine, store):
+        """Backends may mint colliding local ids like 'job-1'."""
+        class Fixed(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                self.executions.append((task, idempotency_key))
+                return TaskHandle(id="job-1", backend_id=self.id,
+                                  idempotency_key=idempotency_key)
+
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.PENDING)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Fixed("alpha", ["ci.rerun_job"]))
+        alpha = next(b for b in router._backends if b.id == "alpha")
+        first = router.invoke(Request("ci.rerun_job", "a", {"job_id": "a"}))
+        second = router.invoke(Request("ci.rerun_job", "b", {"job_id": "b"}))
+        # Same handle id, different actions: bindings must not collide.
+        assert first.handle.id == second.handle.id == "job-1"
+        assert len(router.outstanding_claims()) == 2
+
+    def test_bindings_survive_a_router_restart(self, registry, engine, store):
+        """The ledger is the durable side; an in-process map would lose this
+        and strand the claim forever."""
+        class Pending(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TaskState.PENDING)
+
+        ledger = IdempotencyLedger()
+        backend = Pending("primary", ["ci.rerun_job"])
+        first_router = CapabilityRouter(registry, engine, store, ledger)
+        first_router.register_backend(backend)
+        result = first_router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+
+        fresh = CapabilityRouter(registry, engine, store, ledger)
+        fresh.register_backend(backend)
+        assert fresh.settle(result, backend) is ClaimOutcome.PENDING
 
 
 class TestScriptedWorkload:
