@@ -754,11 +754,25 @@ the matching test — not merely *a* test — goes red, then revert. All six fix
 here carry one. Two of them turned nothing red at all before the fix, which is
 the entire point of the exercise.
 
-**What reverses it.** Nothing about the principle. The *mechanism* is worth
-revisiting: these were run by hand and are not repeatable. If the count of
-guards keeps rising, a mutation-testing harness (`mutmut`, `cosmic-ray`) over
-`src/jarvis_core/` earns its keep — with the caveat that a general mutation
-tool scores *lines*, and what matters here is whether the right test failed.
+**The mechanism, built in round 28.** The first six were found by hand, which
+does not scale and does not repeat. `tools/mutation_sweep.py` now does it
+wholesale: swap every comparison, boolean, `and`/`or` and `not` in
+`src/jarvis_core/`, one at a time, and report what the suite fails to notice.
+First run: **428 mutants, 133 survived, 58 of them substantive** — branches no
+test asserted at all. It found a seventh dead guard immediately
+(`Capability.__post_init__`, which computed a condition and then assigned a
+field the condition had already established was empty), and it found that the
+`leaks()` fix earlier in this same session was itself only half-asserted: the
+test passed with either arm alone. The fixer is not exempt.
+
+**What it cannot do**, so read the survivors rather than the count: it scores
+*branches*, not whether the **right** test failed — a mutant killed by an
+unrelated test still counts as killed — and it says nothing about guards that
+were never written. It is a floor, not a ceiling.
+
+**What reverses it.** Nothing about the principle. The sweep takes ~7 minutes
+for the whole core, so it belongs after adding a guard rather than in a
+pre-commit hook; if that stops being true, cache per-file results by hash.
 
 **Relation to D19.** D19 said: when findings circle one component, the
 component is the problem. D20 is the other half: when findings stop appearing,

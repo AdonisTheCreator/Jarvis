@@ -64,12 +64,17 @@ src/jarvis_core/
   `RecallAuthority`; the caller asks for a scope and something else decides.
   The Record is the highest-value exfiltration target in the system, so a
   scope the caller picks for itself is not a scope.
-- **A guard must be able to fail.** Three separate bugs here were guards that
-  could not: a generation check that was inert, a `leaks()` diagnostic that
-  could not detect the broken fan-out it existed to detect, and a kill switch
-  whose fail-closed branch was unreachable because `Path.exists()` swallows
-  the errno. Mutation-test every guard — break the thing it protects and watch
-  it go red — or it is decoration.
+- **A guard must be able to fail.** Seven bugs here were guards that could
+  not: an inert generation check, a `leaks()` diagnostic blind to the broken
+  fan-out it existed to detect, a kill switch whose fail-closed branch was
+  unreachable because `Path.exists()` swallows the errno, and a
+  `Capability.__post_init__` that computed a condition and then did nothing
+  with it. Break the thing a guard protects and watch it go red, or it is
+  decoration. `tools/mutation_sweep.py` does this wholesale (D20).
+- **"No undo" is a declaration, not an absence.** An external, irreversible
+  capability must set `undo` — a compensating capability, or `NO_UNDO`. `None`
+  means nobody has said, and the checkpoint's irreversible bucket needs to
+  tell those apart.
 - **A class the core does not own may be indexed, never copied.** `procedural`
   lives in SKILL.md files and `operational` in the control plane; a canonical
   copy here is a second owner, which is the drift docs/04 Rule 2 forbids.
@@ -81,9 +86,15 @@ src/jarvis_core/
 ## Commands
 
 ```bash
-python3 -m pytest -q          # 347 tests, ~1.3s
+python3 -m pytest -q          # 374 tests, ~1.4s
 python3 -m pytest tests/test_invariants.py    # the vendor-freedom check
+python3 tools/mutation_sweep.py               # break each guard; see if a test notices
 ```
+
+`mutation_sweep.py` is slow (~7 min for the whole core) and is meant to be run
+after adding a guard, not on every change. A survivor is a branch nothing
+asserts; read them rather than the count, since it scores branches, not whether
+the *right* test failed.
 
 ## Status
 
