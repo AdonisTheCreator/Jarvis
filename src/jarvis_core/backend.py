@@ -20,13 +20,27 @@ from typing import Any, Iterator, Mapping, Sequence
 
 
 class TaskState(StrEnum):
+    """Adapters must honour what each terminal state promises about the *effect*,
+    because the idempotency ledger acts on it.
+
+    ``FAILED`` is the only state that asserts the side effect **did not
+    happen**; it is the only one that frees the claim for a retry. If an
+    adapter cannot promise that -- a send the provider may already have
+    accepted, a cancellation that raced -- it must report ``CANCELLED`` or
+    ``INTERRUPTED``, which hold the claim instead.
+    """
+
     PENDING = "pending"
     RUNNING = "running"
     AWAITING_APPROVAL = "awaiting_approval"
     SUCCEEDED = "succeeded"
+    """Completed. The effect happened."""
     FAILED = "failed"
+    """Completed unsuccessfully, and the effect **provably did not happen**."""
     CANCELLED = "cancelled"
+    """Stopped, but the effect may already have landed."""
     INTERRUPTED = "interrupted"
+    """Stopped mid-flight; the effect may have partly landed."""
 
     @property
     def terminal(self) -> bool:
@@ -34,6 +48,11 @@ class TaskState(StrEnum):
             TaskState.SUCCEEDED, TaskState.FAILED,
             TaskState.CANCELLED, TaskState.INTERRUPTED,
         }
+
+    @property
+    def guarantees_no_effect(self) -> bool:
+        """True only where an adapter has promised nothing happened."""
+        return self is TaskState.FAILED
 
 
 @dataclass(frozen=True, slots=True)

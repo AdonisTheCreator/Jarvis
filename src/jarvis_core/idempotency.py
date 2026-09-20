@@ -156,6 +156,12 @@ class IdempotencyLedger:
             del self._states[token.key]
             return True
 
+    def peek(self, key: str) -> Claim | None:
+        """Read a claim without taking one. Used by operator recovery paths."""
+        with self._lock:
+            current = self._states.get(key)
+            return current if current and current.state is ClaimState.IN_FLIGHT else None
+
     def in_flight(self) -> list[str]:
         """Keys still claimed but not resolved.
 
@@ -173,5 +179,3 @@ class IdempotencyLedger:
         with self._lock:
             claim = self._states.get(key)
             return claim.state if claim else None
-
-

@@ -16,11 +16,13 @@ from .errors import (
     ApprovalInvalid, ApprovalRequired, JarvisCoreError, KillSwitchEngaged,
     PolicyDenied, RecordIntegrityError, SubjectForgotten,
 )
-from .idempotency import IdempotencyLedger, derive_key
+from .idempotency import ClaimToken, IdempotencyLedger, derive_key
 from .killswitch import FileKillSwitch, KillSwitch, NullKillSwitch
 from .memory import CanonicalMemory, Fact, MemoryClass, Provenance
 from .quarantine import EvidenceRef, Proposal, QuarantinedWorker
-from .router import CapabilityRouter, DuplicateSuppressed, NoBackendAvailable
+from .router import (
+    CapabilityRouter, ClaimOutcome, DuplicateSuppressed, NoBackendAvailable, TaskMismatch,
+)
 
 __all__ = [
     "AutonomyClass",
@@ -29,11 +31,12 @@ __all__ = [
     "PositionPolicy", "PrivacyClass",
     "ApprovalInvalid", "ApprovalRequired", "JarvisCoreError", "KillSwitchEngaged",
     "PolicyDenied", "RecordIntegrityError", "SubjectForgotten",
-    "IdempotencyLedger", "derive_key",
+    "ClaimToken", "IdempotencyLedger", "derive_key",
     "FileKillSwitch", "KillSwitch", "NullKillSwitch",
     "CanonicalMemory", "Fact", "MemoryClass", "Provenance",
     "EvidenceRef", "Proposal", "QuarantinedWorker",
-    "CapabilityRouter", "DuplicateSuppressed", "NoBackendAvailable",
+    "CapabilityRouter", "ClaimOutcome", "DuplicateSuppressed", "NoBackendAvailable",
+    "TaskMismatch",
     "__version__",
 ]
 __version__ = "0.1.0"

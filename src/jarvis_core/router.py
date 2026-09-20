@@ -325,6 +325,23 @@ class CapabilityRouter:
             return self._idempotency.release(token)
         raise ValueError(f"cannot resolve a claim as {outcome.value!r}")
 
+    def force_release(self, key: str) -> bool:
+        """Free a claim whose token was lost -- an operator escape hatch.
+
+        A token normally dies with the exception that stranded its claim, and
+        a ``HELD`` claim outlives the process that holds its token. Without a
+        key-based path those keys appear in :meth:`outstanding_claims` with no
+        way to act on them, and the action is suppressed forever.
+
+        **This bypasses the generation guard**, so it can free a live claim as
+        well as a dead one. Use it only after establishing that the side effect
+        did not happen: a wrongly released claim sends the message twice.
+        """
+        claim = self._idempotency.peek(key)
+        if claim is None:
+            return False
+        return self._idempotency.release(claim.token)
+
     def outstanding_claims(self) -> list[str]:
         """Idempotency keys held but unresolved.
 
@@ -436,7 +453,10 @@ class CapabilityRouter:
             # before", which is impossible without it.
             self._idempotency.complete(token, handle.id if handle else None)
             return ClaimOutcome.COMPLETED
-        if state in {TaskState.FAILED, TaskState.CANCELLED}:
+        if state is not None and state.guarantees_no_effect:
+            # Only FAILED promises the effect did not happen. A cancelled send
+            # the provider already accepted would otherwise free the claim and
+            # the retry would send twice.
             self._idempotency.release(token)
             return ClaimOutcome.RELEASED
         return ClaimOutcome.HELD

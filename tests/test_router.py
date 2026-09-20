@@ -6,7 +6,6 @@ from jarvis_core.backend import (
     AgentBackend, Estimate, HealthStatus, Task, TaskHandle, TaskState, TaskStatus,
 )
 from jarvis_core.capability import Capability, CapabilityRegistry
-from jarvis_core.idempotency import ClaimState, IdempotencyLedger
 from jarvis_core.errors import ApprovalRequired, PolicyDenied
 from jarvis_core.ids import new_ulid
 from jarvis_core.policy import PolicyEngine, Request
@@ -258,6 +257,63 @@ class TestClaimLifecycle:
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
         assert result.claim is ClaimOutcome.COMPLETED
         assert router._idempotency.claim(result.idempotency_key).result_ref == result.handle.id
+
+    def test_only_failed_releases_the_claim(self, registry, engine, store):
+        """CANCELLED may mean the provider already accepted it, so releasing
+        there would let the retry send twice. Only FAILED promises no effect."""
+        from jarvis_core.backend import TaskState as TS
+
+        assert TS.FAILED.guarantees_no_effect is True
+        for state in (TS.CANCELLED, TS.INTERRUPTED, TS.SUCCEEDED, TS.PENDING):
+            assert state.guarantees_no_effect is False
+
+        class Cancelled(FakeBackend):
+            def status(self, handle):
+                return TaskStatus(handle=handle, state=TS.CANCELLED)
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Cancelled("cancelling", ["ci.rerun_job"]))
+        result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert result.claim is ClaimOutcome.HELD
+
+    def test_a_lost_token_can_still_be_recovered_by_an_operator(
+        self, registry, engine, store
+    ):
+        """A token dies with the exception that stranded its claim, and a HELD
+        claim outlives the process holding it. Without a key-based path those
+        keys are listed with no way to act on them."""
+        class RecoveringBackend(FakeBackend):
+            """Fails once, then works -- as a real transient outage would."""
+
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self.healthy_now = False
+
+            def execute(self, task, idempotency_key=None):
+                if not self.healthy_now:
+                    raise RuntimeError("transient outage")
+                return super().execute(task, idempotency_key)
+
+        router = CapabilityRouter(registry, engine, store)
+        backend = RecoveringBackend("flaky", ["ci.rerun_job"])
+        router.register_backend(backend)
+        request = Request("ci.rerun_job", "j", {"job_id": "j"})
+        with pytest.raises(RuntimeError):
+            router.invoke(request)
+
+        # The claim is held, correctly -- but its token died with the exception.
+        stranded = router.outstanding_claims()
+        assert len(stranded) == 1
+        backend.healthy_now = True
+        with pytest.raises(DuplicateSuppressed):
+            router.invoke(request)
+
+        assert router.force_release(stranded[0]) is True
+        assert router.outstanding_claims() == []
+        assert router.invoke(request).handle is not None
+
+    def test_force_release_reports_when_there_was_nothing_to_free(self, router):
+        assert router.force_release("no-such-key") is False
 
     def test_a_clear_failure_releases_it_for_a_real_retry(self, registry, engine, store):
         class Failing(FakeBackend):
