@@ -55,6 +55,9 @@ class EventKind(StrEnum):
     APPROVAL_GRANT = "approval.grant"
     APPROVAL_DENY = "approval.deny"
     POLICY_WRITE = "policy.write"  # D17: spoken routing policy
+    CLAIM_OVERRIDE = "claim.override"
+    """An operator freed an idempotency claim by hand. The one operation in
+    the system that can deliberately cause a duplicate side effect."""
     # Proactivity
     WATCH_FIRE = "watch.fire"
     SALIENCE_SCORE = "salience.score"
@@ -103,6 +106,7 @@ PERMANENT_KINDS: frozenset[EventKind] = frozenset(
         EventKind.MEMORY_FORGET,
         EventKind.SKILL_APPROVE,
         EventKind.KILLSWITCH,
+        EventKind.CLAIM_OVERRIDE,
     }
 )
 

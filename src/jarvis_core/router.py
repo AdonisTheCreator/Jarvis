@@ -269,11 +269,18 @@ class CapabilityRouter:
 
         state = self._state_of(backend, handle)
         outcome = self._resolve_at_dispatch(token, state, handle)
-        # ``state is None`` means status() raised: we do not know what happened,
-        # and recording that as a plain result would assert a certainty the code
-        # has explicitly refused to have.
-        uncertain = state is None or state is TaskState.INTERRUPTED
-        failed = uncertain or state in {TaskState.FAILED, TaskState.CANCELLED}
+        # Uncertain means: the claim is held because we cannot say the effect
+        # did or did not land. ``state is None`` (status() raised) and every
+        # terminal state that makes no no-effect promise qualify. Recording
+        # CANCELLED as certain while the ledger holds its claim would make the
+        # Record contradict the ledger, and an operator trusting it would
+        # force_release and send twice.
+        uncertain = state is None or (
+            state.terminal
+            and state is not TaskState.SUCCEEDED
+            and not state.guarantees_no_effect
+        )
+        failed = uncertain or state is TaskState.FAILED
         self._record.append(
             make_event(
                 # A backend that reports failure immediately must not be
@@ -325,7 +332,7 @@ class CapabilityRouter:
             return self._idempotency.release(token)
         raise ValueError(f"cannot resolve a claim as {outcome.value!r}")
 
-    def force_release(self, key: str) -> bool:
+    def force_release(self, key: str, *, operator: str = "user", reason: str = "") -> bool:
         """Free a claim whose token was lost -- an operator escape hatch.
 
         A token normally dies with the exception that stranded its claim, and
@@ -335,12 +342,32 @@ class CapabilityRouter:
 
         **This bypasses the generation guard**, so it can free a live claim as
         well as a dead one. Use it only after establishing that the side effect
-        did not happen: a wrongly released claim sends the message twice.
+        did not happen: a wrongly released claim sends the message twice. It is
+        recorded as a permanent ``claim.override`` event for exactly that
+        reason -- it is the one operation that can deliberately cause a
+        duplicate effect, so it must never be invisible.
         """
         claim = self._idempotency.peek(key)
         if claim is None:
             return False
-        return self._idempotency.release(claim.token)
+        released = self._idempotency.release(claim.token)
+        if released:
+            self._record.append(
+                make_event(
+                    EventKind.CLAIM_OVERRIDE,
+                    actor=Actor.USER,
+                    actor_id=operator,
+                    session="operator",
+                    subject_keys=("system",),
+                    meta={
+                        "idempotency_key": key,
+                        "generation": claim.generation,
+                        "reason": reason,
+                        "note": "a released claim permits the action to run again",
+                    },
+                )
+            )
+        return released
 
     def outstanding_claims(self) -> list[str]:
         """Idempotency keys held but unresolved.

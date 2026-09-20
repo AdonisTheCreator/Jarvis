@@ -275,6 +275,9 @@ class TestClaimLifecycle:
         router.register_backend(Cancelled("cancelling", ["ci.rerun_job"]))
         result = router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
         assert result.claim is ClaimOutcome.HELD
+        # The Record must agree with the ledger: a held claim means uncertain.
+        errors = [s.event for s in store.scan(kinds=[EventKind.TOOL_ERROR])]
+        assert errors[-1].meta["effect_uncertain"] is True
 
     def test_a_lost_token_can_still_be_recovered_by_an_operator(
         self, registry, engine, store
@@ -315,6 +318,34 @@ class TestClaimLifecycle:
     def test_force_release_reports_when_there_was_nothing_to_free(self, router):
         assert router.force_release("no-such-key") is False
 
+    def test_an_override_is_permanently_recorded(self, registry, engine, store):
+        """The one operation that can deliberately cause a duplicate effect
+        must never be invisible in the trail."""
+        from jarvis_core.record.projections import AuditProjection
+
+        class Exploding(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                raise RuntimeError("boom")
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Exploding("flaky", ["ci.rerun_job"]))
+        with pytest.raises(RuntimeError):
+            router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+
+        key = router.outstanding_claims()[0]
+        assert router.force_release(key, operator="harrison", reason="verified not sent")
+
+        overrides = [s.event for s in store.scan(kinds=[EventKind.CLAIM_OVERRIDE])]
+        assert len(overrides) == 1
+        assert overrides[0].is_permanent
+        assert overrides[0].meta["reason"] == "verified not sent"
+        assert overrides[0].actor_id == "harrison"
+        assert EventKind.CLAIM_OVERRIDE in [e.kind for e in AuditProjection(store).trail()]
+
+    def test_a_failed_override_records_nothing(self, router, store: RecordStore):
+        assert router.force_release("no-such-key") is False
+        assert [s.event for s in store.scan(kinds=[EventKind.CLAIM_OVERRIDE])] == []
+
     def test_a_clear_failure_releases_it_for_a_real_retry(self, registry, engine, store):
         class Failing(FakeBackend):
             def status(self, handle):
@@ -327,7 +358,7 @@ class TestClaimLifecycle:
         assert router.invoke(request).handle is not None  # retry permitted
 
     @pytest.mark.parametrize("state", [TaskState.PENDING, TaskState.RUNNING,
-                                       TaskState.INTERRUPTED, None])
+                                       TaskState.INTERRUPTED, TaskState.CANCELLED, None])
     def test_anything_unclear_holds_the_claim(self, registry, engine, store, state):
         """Guessing either way sends the message twice, or never."""
         class Unclear(FakeBackend):
