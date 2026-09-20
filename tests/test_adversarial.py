@@ -8,7 +8,9 @@ import pytest
 
 from jarvis_core.policy import Outcome, PolicyEngine, Request
 from jarvis_core.quarantine import EvidenceRef, Proposal, QuarantinedWorker
+from jarvis_core.errors import UnredactableSecret
 from jarvis_core.record import redact
+from jarvis_core.record.redact import redact_bytes
 
 # Real shapes of indirect prompt injection: an email, a PR comment, an app
 # review. Each tries to turn ingested content into an action.
@@ -112,3 +114,35 @@ class TestSecretsNeverEnterTheRecord:
         """Over-redaction that eats commit hashes would make the archive useless."""
         text = "commit b2:324dcf027dd4a30a9f1e2b3c4d5e6f70 in repo jarvis"
         assert redact(text).text == text
+
+    def test_a_credential_hiding_in_a_binary_payload_is_refused(self):
+        """The bytes around a key are not a reason to archive it. This used to
+        return the payload untouched with an empty report, which reads in the
+        audit projection as 'we looked and it was clean'."""
+        blob = b"\x89PNG\r\n\x1a\n" + b"AKIAIOSFODNN7EXAMPLE" + b"\xff\xd8\xff\xe0"
+        with pytest.raises(UnredactableSecret) as caught:
+            redact_bytes(blob)
+        assert "aws-access-key" in caught.value.labels
+
+    def test_a_clean_binary_payload_is_stored_but_marked_unscanned(self):
+        """Empty labels must not mean the same thing for bytes we could read
+        and bytes we could not."""
+        payload, report = redact_bytes(b"\x89PNG\r\n\x1a\n\xff\xd8\xff\xe0")
+        assert payload == b"\x89PNG\r\n\x1a\n\xff\xd8\xff\xe0"   # byte-exact
+        assert report.redacted is False and report.scanned is False
+
+    def test_a_binary_payload_is_not_rejected_for_looking_random(self):
+        """A lossy decode of any compressed file is high-entropy gibberish, so
+        the entropy heuristic would refuse every screenshot in the system."""
+        import os as _os
+        payload, report = redact_bytes(b"\xff\xd8\xff\xe0" + _os.urandom(4096))
+        assert report.scanned is False and report.labels == ()
+
+    def test_the_store_records_that_a_payload_was_only_checked(self, store):
+        from jarvis_core.record import Actor, EventKind, make_event
+        stored = store.append(
+            make_event(EventKind.USER_TURN, actor=Actor.USER, session="s1",
+                       subject_keys=["project:jarvis"]),
+            b"\x89PNG\r\n\x1a\n\xff\xd8",
+        )
+        assert stored.event.meta["redaction_scanned"] is False

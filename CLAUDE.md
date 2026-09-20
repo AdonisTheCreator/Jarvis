@@ -77,7 +77,7 @@ src/jarvis_core/
 ## Commands
 
 ```bash
-python3 -m pytest -q          # 336 tests, ~1.2s
+python3 -m pytest -q          # 343 tests, ~1.3s
 python3 -m pytest tests/test_invariants.py    # the vendor-freedom check
 ```
 

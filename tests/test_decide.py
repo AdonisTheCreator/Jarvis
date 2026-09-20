@@ -180,3 +180,39 @@ class TestCalibration:
 
     def test_empty_log_is_not_trustworthy(self):
         assert not CalibrationLog().report("p").is_trustworthy()
+
+    def test_a_new_point_is_not_the_same_as_a_broken_one(self):
+        """Both mean 'do not believe the thresholds' and want opposite
+        responses: one needs traffic, the other needs demoting. A single
+        SUSPECT demotes a perfectly calibrated point for being new."""
+        log = CalibrationLog()
+        for i in range(10):
+            log.record("new", 0.9, correct=i < 9)      # calibrated, thin
+        for i in range(100):
+            log.record("broken", 0.95, correct=i < 50)  # plenty, and wrong
+
+        assert log.report("new").verdict() == "insufficient-data"
+        assert log.report("broken").verdict() == "miscalibrated"
+        assert not log.report("new").is_trustworthy()
+        assert set(log.untrustworthy()) == {"broken"}    # the thin one is not demoted
+        assert "insufficient-data" in log.report("new").summary()
+
+    def test_a_stricter_bar_is_honoured_rather_than_swallowed(self):
+        """untrustworthy() took **kwargs, so a misspelled threshold silently
+        fell back to the default and a caller asking for strict got lax."""
+        log = CalibrationLog()
+        for i in range(100):
+            log.record("p", 0.9, correct=i < 85)   # ece ~= 0.05: fine by default
+        assert log.untrustworthy() == {}
+        assert set(log.untrustworthy(max_ece=0.01)) == {"p"}
+        assert log.untrustworthy(min_samples=200) == {}
+        with pytest.raises(TypeError):
+            log.untrustworthy(min_sample=1)        # the typo is now loud
+
+    def test_an_out_of_range_confidence_is_refused(self):
+        """It falls in no bucket while still counting in n, which divides ECE
+        down and makes a miscalibrated point look better than it is."""
+        log = CalibrationLog()
+        for bad in (-0.1, 1.5):
+            with pytest.raises(ValueError, match="between 0 and 1"):
+                log.record("p", bad, correct=True)

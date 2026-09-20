@@ -11,7 +11,7 @@ outcome (D5), so the dataset exists for free.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 
 DEFAULT_BUCKETS: tuple[float, ...] = (0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 1.01)
@@ -24,6 +24,13 @@ class Observation:
     point_id: str
     confidence: float
     correct: bool
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.confidence <= 1.0:
+            # An out-of-range confidence falls outside every bucket while still
+            # counting in n, which divides ECE down and makes a miscalibrated
+            # point look better than it is. Fail here instead.
+            raise ValueError("confidence must be between 0 and 1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,13 +58,27 @@ class CalibrationReport:
     ece: float
     """Expected Calibration Error: the sample-weighted mean bucket gap."""
 
+    def verdict(self, *, max_ece: float = 0.1, min_samples: int = 50) -> str:
+        """``ok``, ``insufficient-data`` or ``miscalibrated``.
+
+        The last two both mean "do not believe the thresholds" and call for
+        opposite responses: one needs more traffic, the other needs the point
+        demoted. Collapsing them into a single SUSPECT gets a perfectly
+        calibrated new point demoted for the crime of being new.
+        """
+        if self.n < min_samples:
+            return "insufficient-data"
+        return "ok" if self.ece <= max_ece else "miscalibrated"
+
     def is_trustworthy(self, *, max_ece: float = 0.1, min_samples: int = 50) -> bool:
         """Whether thresholds on this point should still be believed."""
-        return self.n >= min_samples and self.ece <= max_ece
+        return self.verdict(max_ece=max_ece, min_samples=min_samples) == "ok"
 
     def summary(self) -> str:
-        verdict = "ok" if self.is_trustworthy() else "SUSPECT"
-        return f"{self.point_id}: n={self.n} brier={self.brier:.3f} ece={self.ece:.3f} [{verdict}]"
+        return (
+            f"{self.point_id}: n={self.n} brier={self.brier:.3f} "
+            f"ece={self.ece:.3f} [{self.verdict()}]"
+        )
 
 
 class CalibrationLog:
@@ -112,18 +133,23 @@ class CalibrationLog:
             ece=weighted_gap / n,
         )
 
-    def untrustworthy(self, **kwargs: float | int) -> Mapping[str, CalibrationReport]:
+    def untrustworthy(
+        self, *, max_ece: float = 0.1, min_samples: int = 50
+    ) -> Mapping[str, CalibrationReport]:
         """Points whose calibration has gone bad and should be demoted.
 
         A point that fails here is dropped to its deterministic fallback with a
-        notice -- per point, never globally.
+        notice -- per point, never globally. Points with too little traffic are
+        *not* included: they have not been shown to be wrong, only to be new.
+
+        The thresholds are named parameters rather than ``**kwargs`` on
+        purpose. A misspelled one used to be swallowed and the default applied,
+        so a caller asking for a strict bar quietly got a lax one.
         """
-        out: dict[str, CalibrationReport] = {}
-        for point_id in self.point_ids():
-            report = self.report(point_id)
-            if report.n >= int(kwargs.get("min_samples", 50)) and not report.is_trustworthy(
-                max_ece=float(kwargs.get("max_ece", 0.1)),
-                min_samples=int(kwargs.get("min_samples", 50)),
-            ):
-                out[point_id] = report
-        return out
+        return {
+            point_id: report
+            for point_id in self.point_ids()
+            if (report := self.report(point_id)).verdict(
+                max_ece=max_ece, min_samples=min_samples
+            ) == "miscalibrated"
+        }

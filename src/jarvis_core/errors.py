@@ -55,3 +55,20 @@ class SubjectForgotten(JarvisCoreError):
 
 class RecordIntegrityError(JarvisCoreError):
     """The append-only log failed a hash or ordering check."""
+
+
+class UnredactableSecret(JarvisCoreError):
+    """A credential was found in a payload that cannot be rewritten in place.
+
+    Refusing the write is the point. This module exists so a credential never
+    enters the Record, and "the surrounding bytes were not text" is not a
+    reason to make an exception -- the archive outlives every assumption about
+    who will read it.
+    """
+
+    def __init__(self, labels: tuple[str, ...]) -> None:
+        self.labels = labels
+        super().__init__(
+            f"payload is not UTF-8 and contains {list(labels)}; it cannot be "
+            "redacted in place and will not be stored"
+        )

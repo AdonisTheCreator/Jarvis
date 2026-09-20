@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass
 from typing import Final, Iterable, Pattern
 
+from ..errors import UnredactableSecret
+
 REDACTED: Final[str] = "[REDACTED:{label}]"
 
 #: Ordered most-specific first so a matched provider key is not also caught by
@@ -57,6 +59,13 @@ class RedactionReport:
 
     text: str
     labels: tuple[str, ...]
+    scanned: bool = True
+    """False when the payload could not be rewritten and was only checked.
+
+    ``labels`` being empty then means "nothing found in what we could read",
+    not "nothing is there", and the two must not look alike to a reader of the
+    audit projection.
+    """
 
     @property
     def redacted(self) -> bool:
@@ -104,11 +113,25 @@ def redact(text: str, *, entropy_scan: bool = True) -> RedactionReport:
 
 
 def redact_bytes(payload: bytes, *, entropy_scan: bool = True) -> tuple[bytes, RedactionReport]:
-    """Redact a UTF-8 payload. Binary payloads pass through untouched."""
+    """Redact a UTF-8 payload. A non-UTF-8 payload is scanned, not rewritten.
+
+    Rewriting bytes we cannot decode would corrupt them, so they are stored
+    as-is -- but they are still *checked*, on a lossy decode, and a credential
+    found in one raises :class:`UnredactableSecret` rather than being archived.
+    Letting a key through because the bytes around it were not text inverts the
+    only bias this module has.
+
+    The check is patterns-only: a lossy decode of binary turns every run of
+    bytes into high-entropy gibberish, so the entropy heuristic would reject
+    every screenshot and archive in the system.
+    """
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError:
-        return payload, RedactionReport(text="", labels=())
+        found = redact(payload.decode("utf-8", "ignore"), entropy_scan=False).labels
+        if found:
+            raise UnredactableSecret(found)
+        return payload, RedactionReport(text="", labels=(), scanned=False)
     report = redact(text, entropy_scan=entropy_scan)
     return report.text.encode("utf-8"), report
 

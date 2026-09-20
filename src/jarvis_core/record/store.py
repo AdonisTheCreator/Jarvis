@@ -105,9 +105,14 @@ class RecordStore:
                 )
                 self._write_blob(ref, subject, epoch, sealed)
 
-        if report is not None and report.redacted:
+        if report is not None and (report.redacted or not report.scanned):
             meta = dict(event.meta)
-            meta["redacted"] = list(report.labels)
+            if report.redacted:
+                meta["redacted"] = list(report.labels)
+            if not report.scanned:
+                # An empty "redacted" on a binary payload would read as "we
+                # looked and it was clean". We looked at what we could decode.
+                meta["redaction_scanned"] = False
             event = Event.from_dict({**event.to_dict(), "meta": meta})
 
         with self._lock:
