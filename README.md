@@ -13,8 +13,20 @@ the charter translates that dedication into seven binding engineering constraint
 
 ## Where this stands
 
-This repository currently holds the **research and architecture phase**. No code yet, on
-purpose: the contracts come before the integrations.
+**Phase 0 is built and tested.** `src/jarvis_core/` is the small core the architecture
+argues for: capability router, policy engine, canonical memory, the Record, the decision
+layer. 394 tests, ~1.4s, one third-party dependency (`cryptography`) — and an asserted
+invariant that no module in the core may import a vendor type, because that is what keeps
+the control plane swappable.
+
+The research docs below came first, on purpose: the contracts before the integrations.
+They are still the source of truth for *why*, and several are now enforced by tests rather
+than by good intentions — `tests/test_invariants.py` checks the vendor-freedom rule, and
+`tests/test_decide.py` reads doc 20 and fails if the catalog and the code drift apart.
+
+Next is Phase 0.5: the Personal Jarvis audit is done statically (doc 18) and needs a VM for
+the wake-to-ack measurement, and the control-plane bake-off (doc 10) is now *validation*
+rather than selection, since D12 chose Hermes.
 
 | Doc | What it answers |
 |---|---|
@@ -37,9 +49,12 @@ purpose: the contracts come before the integrations.
 | [16 — Model Topology](docs/16-MODEL-TOPOLOGY.md) | Why there is no "main Jarvis model" |
 | [17 — Routing Policy](docs/17-ROUTING-POLICY.md) | Spoken policy authorship, the Model Cabinet, and the decision layer as a rule factory |
 | [18 — Personal Jarvis Audit](docs/18-PERSONAL-JARVIS-AUDIT.md) | D2 findings against commit `888df0c` |
+| [19 — The Timeless Codebase](docs/19-THE-TIMELESS-CODEBASE.md) | Git finds which *commit* broke it; the Record finds which *decision* did |
+| [20 — The Decision Catalog](docs/20-DECISION-CATALOG.md) | All 44 places a bounded decision earns its keep — and the 11 that only look like it |
 
 Start with **04** if you want the argument, **01** if you want the vision, **02** if you
-want the part nobody has built yet, **09** if you want current state.
+want the part nobody has built yet, **09** if you want current state, and `CLAUDE.md` if
+you are about to change the code.
 
 ---
 
