@@ -35,11 +35,18 @@ class NoBackendAvailable(JarvisCoreError):
 
 
 class DuplicateSuppressed(JarvisCoreError):
-    """This exact side effect already happened or is in flight."""
+    """This exact side effect already happened or is in flight.
 
-    def __init__(self, key: str, state: str) -> None:
-        self.key, self.state = key, state
-        super().__init__(f"idempotency key {key[:12]}… is {state}; not repeating")
+    Carries ``result_ref`` when the earlier attempt completed, because the
+    other half of exactly-once is *returning the recorded result instead of
+    repeating the action*. Without it the caller can only see that it was
+    stopped, never what happened the first time.
+    """
+
+    def __init__(self, key: str, state: str, result_ref: str | None = None) -> None:
+        self.key, self.state, self.result_ref = key, state, result_ref
+        detail = f" (earlier result {result_ref})" if result_ref else ""
+        super().__init__(f"idempotency key {key[:12]}… is {state}; not repeating{detail}")
 
 
 class TaskMismatch(JarvisCoreError):
@@ -663,7 +670,7 @@ class CapabilityRouter:
         )
         claim = self._idempotency.claim(key)
         if not claim.should_execute:
-            raise DuplicateSuppressed(key, claim.state.value)
+            raise DuplicateSuppressed(key, claim.state.value, claim.result_ref)
         return claim.token
 
     @staticmethod

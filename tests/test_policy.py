@@ -51,6 +51,32 @@ class TestApprovalTokens:
         with pytest.raises(ApprovalInvalid, match="expired"):
             approvals.redeem(token, "message.send", "t", {})
 
+    def test_the_default_spent_store_reports_itself_non_durable(self, approvals):
+        """Single-use is only true if 'already spent' survives a restart. The
+        in-memory default does not, and says so rather than pretending."""
+        assert approvals.durable is False
+
+    def test_a_durable_spent_store_makes_single_use_survive_a_restart(self):
+        class Durable:
+            durable = True
+
+            def __init__(self):
+                self.ids: set[str] = set()
+
+            def add(self, token_id): self.ids.add(token_id)
+            def contains(self, token_id): return token_id in self.ids
+
+        shared = Durable()
+        secret = os.urandom(32)
+        first = ApprovalLedger(secret, shared)
+        assert first.durable is True
+        token = first.issue("message.send", "sam", {"x": 1})
+        first.redeem(token, "message.send", "sam", {"x": 1})
+
+        restarted = ApprovalLedger(secret, shared)
+        with pytest.raises(ApprovalInvalid, match="already used"):
+            restarted.redeem(token, "message.send", "sam", {"x": 1})
+
     def test_forged_signature_is_rejected(self, approvals: ApprovalLedger):
         other = ApprovalLedger(os.urandom(32))
         forged = other.issue("door.unlock", "front", {})
@@ -123,9 +149,36 @@ class TestA3RequiresAProtocol:
 
     def test_a3_inside_a_declared_protocol_is_allowed(self, engine, approvals, protocols):
         protocols.declare(self._protocol())
-        token = approvals.issue("door.unlock", "front", {})
+        params = {"door": "front"}
+        token = approvals.issue("door.unlock", "front", params)
         decision = engine.evaluate(
-            Request("door.unlock", "front", approval=token,
+            Request("door.unlock", "front", params, approval=token,
+                    protocol="evening_lockup", auth_level=AuthLevel.STRONG)
+        )
+        assert decision.outcome is Outcome.ALLOW
+
+    def test_a_protocols_declared_parameters_bind(self, engine, approvals, protocols):
+        """A Protocol that named the front door does not authorize the garage.
+        Checking the capability alone would make the fixed parameter set
+        decorative and reintroduce the in-the-moment judgment R8 removes."""
+        protocols.declare(self._protocol())
+        params = {"door": "garage"}
+        token = approvals.issue("door.unlock", "front", params)
+        decision = engine.evaluate(
+            Request("door.unlock", "front", params, approval=token,
+                    protocol="evening_lockup", auth_level=AuthLevel.STRONG)
+        )
+        assert decision.outcome is Outcome.DENY
+        assert "with these parameters" in decision.reason
+
+    def test_a_step_declaring_no_parameters_constrains_none(
+        self, engine, approvals, protocols
+    ):
+        protocols.declare(self._protocol(steps=(ProtocolStep("door.unlock"),)))
+        params = {"door": "anything"}
+        token = approvals.issue("door.unlock", "front", params)
+        decision = engine.evaluate(
+            Request("door.unlock", "front", params, approval=token,
                     protocol="evening_lockup", auth_level=AuthLevel.STRONG)
         )
         assert decision.outcome is Outcome.ALLOW
@@ -137,13 +190,15 @@ class TestA3RequiresAProtocol:
             Request("door.unlock", "front", approval=token,
                     protocol="evening_lockup", auth_level=AuthLevel.STRONG)
         )
-        assert decision.outcome is Outcome.DENY and "does not include" in decision.reason
+        assert decision.outcome is Outcome.DENY
+        assert "does not authorize" in decision.reason
 
     def test_weak_auth_is_rejected(self, engine, approvals, protocols):
         protocols.declare(self._protocol())
-        token = approvals.issue("door.unlock", "front", {})
+        params = {"door": "front"}
+        token = approvals.issue("door.unlock", "front", params)
         decision = engine.evaluate(
-            Request("door.unlock", "front", approval=token,
+            Request("door.unlock", "front", params, approval=token,
                     protocol="evening_lockup", auth_level=AuthLevel.SESSION)
         )
         assert decision.outcome is Outcome.DENY and "strong auth" in decision.reason
@@ -194,13 +249,23 @@ class TestKillSwitch:
             decision = engine.evaluate(Request(capability, "t"))
             assert decision.outcome is Outcome.DENY and "kill switch" in decision.reason
 
-    def test_a_human_can_still_observe_while_halted(self, registry, approvals, protocols, tmp_path):
-        """You must be able to see what is happening while everything is stopped."""
+    @pytest.mark.parametrize("actor", ["user", "user:harrison", "User:Harrison"])
+    def test_a_human_can_still_observe_while_halted(
+        self, registry, approvals, protocols, tmp_path, actor
+    ):
+        """You must be able to see what is happening while everything is
+        stopped -- including under the prefixed actor form the rest of the
+        system uses, or the carve-out denies the very person diagnosing it."""
         sentinel = tmp_path / "HALT"
         sentinel.write_text("halted")
         engine = PolicyEngine(registry, approvals, protocols, FileKillSwitch(sentinel))
-        assert engine.evaluate(Request("ci.read_status", "r", actor="user")).outcome is Outcome.ALLOW
-        assert engine.evaluate(Request("ci.read_status", "r", actor="agent")).outcome is Outcome.DENY
+        assert engine.evaluate(
+            Request("ci.read_status", "r", actor=actor)
+        ).outcome is Outcome.ALLOW
+        for other in ("agent", "watcher:ci", "subconscious", "system"):
+            assert engine.evaluate(
+                Request("ci.read_status", "r", actor=other)
+            ).outcome is Outcome.DENY
 
     def test_unreadable_sentinel_fails_closed(self, registry, approvals, protocols, tmp_path):
         """An unreadable kill switch is indistinguishable from a tampered one."""

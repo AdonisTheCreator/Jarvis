@@ -1,4 +1,6 @@
 """The four read projections over one log."""
+import pytest
+
 from jarvis_core.record import Actor, EventKind, RecordStore, make_event
 from jarvis_core.record.projections import (
     AuditProjection, Checkpoint, ConsolidateProjection, RecallProjection,
@@ -54,6 +56,27 @@ class TestRecall:
         add(store, EventKind.USER_TURN, subjects=["project:jarvis"], payload=b"auth decision")
         add(store, EventKind.USER_TURN, subjects=["project:other"], payload=b"auth decision")
         assert len(RecallProjection(store).search("auth", scope=RecallScope.ARCHIVE)) == 2
+
+    def test_recent_requires_a_bound(self, store: RecordStore):
+        """Unbounded, it would silently equal ARCHIVE -- a narrower-looking
+        scope with none of the narrowing."""
+        add(store, EventKind.USER_TURN, payload=b"auth decision")
+        with pytest.raises(ValueError, match="requires since_event"):
+            RecallProjection(store).search("auth", scope=RecallScope.RECENT)
+
+    def test_recent_excludes_events_before_the_bound(self, store: RecordStore):
+        add(store, EventKind.USER_TURN, payload=b"old auth decision")
+        mark = add(store, EventKind.SESSION_START)
+        add(store, EventKind.USER_TURN, payload=b"new auth decision")
+        hits = RecallProjection(store).search(
+            "auth", scope=RecallScope.RECENT, since_event=mark.event.id
+        )
+        assert len(hits) == 1
+        assert hits[0].payload == b"new auth decision"
+
+    def test_project_scope_requires_a_project(self, store: RecordStore):
+        with pytest.raises(ValueError, match="requires a project"):
+            RecallProjection(store).search("auth", scope=RecallScope.PROJECT)
 
     def test_forgotten_content_is_not_searchable(self, store: RecordStore):
         add(store, EventKind.USER_TURN, subjects=["person:guest"], payload=b"a private thing")

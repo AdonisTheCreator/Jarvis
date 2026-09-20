@@ -224,6 +224,22 @@ class TestRecordStore:
         assert store.payload_or_none(theirs.event) is None
         assert store.payload(mine.event) == b"identical text"  # unaffected
 
+    def test_writing_after_a_forget_is_readable(self, store: RecordStore):
+        """A blob sealed under a destroyed key must not be reused for a later
+        write of the same content -- silent data loss disguised as dedup."""
+        store.append(evt(subject_keys=["person:guest"]), b"same content")
+        store.forget_subject("person:guest")
+        store._keystore.ensure_subject("person:guest")
+        fresh = store.append(evt(subject_keys=["person:guest"]), b"same content")
+        assert store.payload(fresh.event) == b"same content"
+
+    def test_an_unreadable_payload_reads_as_none_rather_than_raising(self, store):
+        """A projection must not throw on a payload it cannot decrypt."""
+        stored = store.append(evt(subject_keys=["person:guest"]), b"private")
+        store.forget_subject("person:guest")
+        store._keystore.ensure_subject("person:guest")  # new key, old ciphertext
+        assert store.payload_or_none(stored.event) is None
+
     def test_reopening_continues_the_chain(self, store: RecordStore, keystore):
         store.append(evt(), b"first")
         reopened = RecordStore(store.root, keystore)

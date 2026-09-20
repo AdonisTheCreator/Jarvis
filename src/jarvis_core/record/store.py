@@ -114,8 +114,11 @@ class RecordStore:
 
     def _write_blob(self, ref: str, subject: str, sealed: Sealed) -> None:
         path = self._blob_path(ref, subject)
-        if path.exists():
-            return  # content-addressed: identical payload, already stored
+        # Deliberately no early return on an existing path. After a
+        # forget_subject() the stored blob is sealed under a destroyed key, so
+        # reusing it would make every *subsequent* write of that content
+        # permanently unreadable -- silent data loss disguised as dedup. The
+        # bytes are identical either way, so overwriting costs no storage.
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".tmp")
         tmp.write_bytes(subject.encode("utf-8") + b"\0" + sealed.to_bytes())
@@ -171,7 +174,10 @@ class RecordStore:
         """
         try:
             return self.payload(event)
-        except (SubjectForgotten, FileNotFoundError):
+        except (SubjectForgotten, FileNotFoundError, ValueError):
+            # ValueError is an authentication failure -- a payload sealed under
+            # a key that no longer exists. Unreadable is unreadable, and a
+            # projection must not throw on it.
             return None
 
     # -- integrity -------------------------------------------------------

@@ -119,7 +119,27 @@ class ProtocolRegistry:
     def names(self) -> Sequence[str]:
         return sorted(self._protocols)
 
-    def covers(self, name: str, capability: str) -> bool:
-        """Does Protocol ``name`` authorize ``capability`` as one of its steps?"""
+    def covers(
+        self, name: str, capability: str, params: Mapping[str, Any] | None = None
+    ) -> bool:
+        """Does Protocol ``name`` authorize this exact call?
+
+        The declared parameters **bind**. A Protocol is a sequence reviewed in
+        calm conditions with its blast radius written down; if it named the
+        garage door, it does not authorize the front door. Checking the
+        capability alone would make the fixed parameter set decorative and
+        quietly reintroduce the in-the-moment judgment Protocols exist to
+        remove (R8).
+
+        A step that declares no parameters places no constraint on them.
+        """
         protocol = self._protocols.get(name)
-        return bool(protocol) and any(s.capability == capability for s in protocol.steps)
+        if protocol is None:
+            return False
+        supplied = dict(params or {})
+        for step in protocol.steps:
+            if step.capability != capability:
+                continue
+            if all(supplied.get(k) == v for k, v in step.params.items()):
+                return True
+        return False

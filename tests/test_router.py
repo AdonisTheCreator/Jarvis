@@ -110,6 +110,16 @@ class TestInvokePath:
         with pytest.raises(DuplicateSuppressed):
             router.invoke(request)
 
+    def test_suppression_carries_the_earlier_result(self, router):
+        """The other half of exactly-once: return what happened before, rather
+        than only reporting that the repeat was stopped."""
+        request = Request("ci.rerun_job", "j", {"job_id": "j"})
+        first = router.invoke(request)
+        with pytest.raises(DuplicateSuppressed) as caught:
+            router.invoke(request)
+        assert caught.value.result_ref == first.handle.id
+        assert caught.value.state == "done"
+
     def test_a_different_action_is_not_suppressed(self, router):
         router.invoke(Request("ci.rerun_job", "job-1", {"job_id": "job-1"}))
         second = router.invoke(Request("ci.rerun_job", "job-2", {"job_id": "job-2"}))

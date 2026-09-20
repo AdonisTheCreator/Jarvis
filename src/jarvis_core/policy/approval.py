@@ -15,6 +15,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from typing import Protocol as TypingProtocol
+
 from ..errors import ApprovalInvalid
 from ..ids import new_ulid
 
@@ -57,6 +59,35 @@ class ApprovalToken:
         }
 
 
+class SpentStore(TypingProtocol):
+    """Where spent approval ids live.
+
+    Deliberately an interface: single-use is only true if "already spent"
+    survives a restart. The in-memory default does not, so a captured token
+    could be replayed after a restart inside its TTL -- acceptable while the
+    whole core is in-memory, and a real hazard the moment anything else is
+    durable. Back it with the same store as the Record before going live.
+    """
+
+    def add(self, token_id: str) -> None: ...
+    def contains(self, token_id: str) -> bool: ...
+
+
+class InMemorySpentStore:
+    """Process-local. Honest about its scope rather than pretending."""
+
+    durable: bool = False
+
+    def __init__(self) -> None:
+        self._ids: set[str] = set()
+
+    def add(self, token_id: str) -> None:
+        self._ids.add(token_id)
+
+    def contains(self, token_id: str) -> bool:
+        return token_id in self._ids
+
+
 class ApprovalLedger:
     """Issues, verifies and spends approval tokens.
 
@@ -65,12 +96,17 @@ class ApprovalLedger:
     by voice from a phone (docs/15 §7).
     """
 
-    def __init__(self, secret: bytes) -> None:
+    def __init__(self, secret: bytes, spent: SpentStore | None = None) -> None:
         if len(secret) < 32:
             raise ValueError("approval secret must be at least 32 bytes")
         self._secret = secret
-        self._spent: set[str] = set()
+        self._spent: SpentStore = spent if spent is not None else InMemorySpentStore()
         self._lock = threading.Lock()
+
+    @property
+    def durable(self) -> bool:
+        """Whether single-use survives a restart. False for the default store."""
+        return bool(getattr(self._spent, "durable", True))
 
     def issue(
         self,
@@ -126,7 +162,7 @@ class ApprovalLedger:
                 "parameters changed since approval -- the human approved a different action"
             )
         with self._lock:
-            if token.id in self._spent:
+            if self._spent.contains(token.id):
                 raise ApprovalInvalid(f"approval {token.id} was already used")
             self._spent.add(token.id)
 

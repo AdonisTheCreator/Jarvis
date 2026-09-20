@@ -87,10 +87,13 @@ class PolicyEngine:
         #    to see what is happening while everything is halted -- but nothing
         #    else does, and no agent-initiated call does.
         if self._kill.is_engaged():
+            # The documented actor form is prefixed ("user:harrison"), so an
+            # exact match would deny the very person trying to diagnose a halt.
+            actor_kind = request.actor.split(":", 1)[0].strip().lower()
             observing = (
                 capability is not None
                 and capability.autonomy == AutonomyClass.A0_OBSERVE
-                and request.actor == "user"
+                and actor_kind == "user"
             )
             if not observing:
                 return self._deny(
@@ -185,10 +188,11 @@ class PolicyEngine:
         protocol = self._protocols.get(request.protocol)
         if protocol is None:
             return self._deny(request, f"unknown protocol {request.protocol!r}", capability)
-        if not self._protocols.covers(request.protocol, request.capability):
+        if not self._protocols.covers(request.protocol, request.capability, request.params):
             return self._deny(
                 request,
-                f"protocol {request.protocol!r} does not include {request.capability!r}",
+                f"protocol {request.protocol!r} does not authorize {request.capability!r} "
+                "with these parameters",
                 capability,
             )
         if protocol.expires_at is not None:

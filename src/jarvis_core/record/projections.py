@@ -66,6 +66,10 @@ class RecallScope(StrEnum):
     """What a quarantined agent gets. Not scoped recall -- none."""
     PROJECT = "project"
     RECENT = "recent"
+    """Bounded by ``since_event``, which :meth:`RecallProjection.search`
+    requires for this scope. Without a bound it would silently equal
+    ``ARCHIVE`` -- a narrower-looking scope with none of the narrowing, which
+    is worse than not offering it."""
     ARCHIVE = "archive"
 
 
@@ -122,16 +126,24 @@ class RecallProjection:
         *,
         scope: RecallScope,
         project: str | None = None,
+        since_event: str | None = None,
         limit: int = 20,
     ) -> list[RecallHit]:
         if scope is RecallScope.NONE:
             # A quarantined agent may already be under someone else's control.
             return []
+        if scope is RecallScope.RECENT and since_event is None:
+            raise ValueError(
+                "RecallScope.RECENT requires since_event; without a bound it "
+                "would silently equal ARCHIVE"
+            )
+        if scope is RecallScope.PROJECT and project is None:
+            raise ValueError("RecallScope.PROJECT requires a project")
         needle_bytes = needle.lower().encode()
         hits: list[RecallHit] = []
         for stored in self._store.scan():
             event = stored.event
-            if not self._in_scope(event, scope, project):
+            if not self._in_scope(event, scope, project, since_event):
                 continue
             payload = self._store.payload_or_none(event)
             if payload is not None and needle_bytes in payload.lower():
@@ -141,14 +153,15 @@ class RecallProjection:
         return hits
 
     @staticmethod
-    def _in_scope(event: Event, scope: RecallScope, project: str | None) -> bool:
+    def _in_scope(
+        event: Event, scope: RecallScope, project: str | None, since_event: str | None
+    ) -> bool:
         if scope is RecallScope.ARCHIVE:
             return True
         if scope is RecallScope.PROJECT:
-            return project is not None and any(
-                key == f"project:{project}" for key in event.subject_keys
-            )
-        return True  # RECENT is bounded by the caller's window, not by subject
+            return any(key == f"project:{project}" for key in event.subject_keys)
+        # RECENT: ULIDs sort by creation time, so the bound is a comparison.
+        return since_event is not None and event.id >= since_event
 
 
 @dataclass(frozen=True, slots=True)
