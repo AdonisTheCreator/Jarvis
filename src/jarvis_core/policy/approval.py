@@ -69,8 +69,18 @@ class SpentStore(TypingProtocol):
     durable. Back it with the same store as the Record before going live.
     """
 
-    def add(self, token_id: str) -> None: ...
-    def contains(self, token_id: str) -> bool: ...
+    durable: bool
+    """Whether "already spent" survives a restart. Declared, not optional: a
+    default of True would fail open for a store that simply omitted it."""
+
+    def try_spend(self, token_id: str) -> bool:
+        """Atomically mark spent. False if it was already spent.
+
+        A separate ``contains`` then ``add`` is not atomic across processes,
+        so two workers could redeem the same captured token concurrently --
+        which is exactly what single-use exists to prevent.
+        """
+        ...
 
 
 class InMemorySpentStore:
@@ -80,12 +90,14 @@ class InMemorySpentStore:
 
     def __init__(self) -> None:
         self._ids: set[str] = set()
+        self._lock = threading.Lock()
 
-    def add(self, token_id: str) -> None:
-        self._ids.add(token_id)
-
-    def contains(self, token_id: str) -> bool:
-        return token_id in self._ids
+    def try_spend(self, token_id: str) -> bool:
+        with self._lock:
+            if token_id in self._ids:
+                return False
+            self._ids.add(token_id)
+            return True
 
 
 class ApprovalLedger:
@@ -105,8 +117,13 @@ class ApprovalLedger:
 
     @property
     def durable(self) -> bool:
-        """Whether single-use survives a restart. False for the default store."""
-        return bool(getattr(self._spent, "durable", True))
+        """Whether single-use survives a restart.
+
+        Fails closed: a store that does not declare ``durable`` is treated as
+        non-durable, because assuming otherwise would silently claim a
+        guarantee nobody made.
+        """
+        return bool(getattr(self._spent, "durable", False))
 
     def issue(
         self,
@@ -161,10 +178,10 @@ class ApprovalLedger:
             raise ApprovalInvalid(
                 "parameters changed since approval -- the human approved a different action"
             )
-        with self._lock:
-            if self._spent.contains(token.id):
-                raise ApprovalInvalid(f"approval {token.id} was already used")
-            self._spent.add(token.id)
+        # Atomic in the store, not merely under this process's lock: a shared
+        # durable store must be safe against two workers at once.
+        if not self._spent.try_spend(token.id):
+            raise ApprovalInvalid(f"approval {token.id} was already used")
 
     def _sign(
         self, token_id: str, capability: str, target: str, params_hash: str, expires_at: float

@@ -43,8 +43,13 @@ src/jarvis_core/
 
 - **Every event needs `subject_keys`.** An event without one can never be
   forgotten. The constructor refuses.
-- **Blobs are namespaced per subject.** Sharing them across subjects means one
-  subject's forget leaves another's copy readable.
+- **Blobs are namespaced per subject *and key epoch*.** Sharing across subjects
+  leaves one subject's forget with another's copy readable; sharing across
+  epochs lets a write after a forget re-seal the blob and un-forget the old
+  event. Both halves pull against each other and both are tested.
+- **A Protocol's declared target and params bind.** Checking the capability
+  name alone makes the fixed parameter set decorative and reintroduces exactly
+  the in-the-moment judgment Protocols exist to remove.
 - **The AAD binds payload → subject; the hash chain binds event → payload.**
   Don't move the binding into the event id; that kills dedup and reopens the
   leak above.
@@ -63,7 +68,7 @@ src/jarvis_core/
 ## Commands
 
 ```bash
-python3 -m pytest -q          # 316 tests, ~0.9s
+python3 -m pytest -q          # 321 tests, ~1.0s
 python3 -m pytest tests/test_invariants.py    # the vendor-freedom check
 ```
 

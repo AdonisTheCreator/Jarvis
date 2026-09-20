@@ -188,11 +188,13 @@ class PolicyEngine:
         protocol = self._protocols.get(request.protocol)
         if protocol is None:
             return self._deny(request, f"unknown protocol {request.protocol!r}", capability)
-        if not self._protocols.covers(request.protocol, request.capability, request.params):
+        if not self._protocols.covers(
+            request.protocol, request.capability, request.params, request.target
+        ):
             return self._deny(
                 request,
                 f"protocol {request.protocol!r} does not authorize {request.capability!r} "
-                "with these parameters",
+                "on this target with these parameters",
                 capability,
             )
         if protocol.expires_at is not None:

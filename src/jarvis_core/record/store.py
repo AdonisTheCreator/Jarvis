@@ -85,13 +85,17 @@ class RecordStore:
                 payload, report = redact_bytes(payload)
             subject = payload_subject or event.subject_keys[0]
             ref = content_hash(payload)
+            epoch = self._keystore.epoch(subject)
             event = event.with_payload(ref)
+            event = Event.from_dict(
+                {**event.to_dict(), "meta": {**event.meta, "payload_epoch": epoch}}
+            )
             if payload_subject is not None and payload_subject != event.subject_keys[0]:
                 event = Event.from_dict(
                     {**event.to_dict(), "meta": {**event.meta, "payload_subject": payload_subject}}
                 )
             sealed = self._keystore.seal(subject, payload, aad=event.payload_aad(subject))
-            self._write_blob(ref, subject, sealed)
+            self._write_blob(ref, subject, epoch, sealed)
 
         if report is not None and report.redacted:
             meta = dict(event.meta)
@@ -112,28 +116,33 @@ class RecordStore:
             self._head = chain
             return StoredEvent(event=event, chain=chain)
 
-    def _write_blob(self, ref: str, subject: str, sealed: Sealed) -> None:
-        path = self._blob_path(ref, subject)
-        # Deliberately no early return on an existing path. After a
-        # forget_subject() the stored blob is sealed under a destroyed key, so
-        # reusing it would make every *subsequent* write of that content
-        # permanently unreadable -- silent data loss disguised as dedup. The
-        # bytes are identical either way, so overwriting costs no storage.
+    def _write_blob(self, ref: str, subject: str, epoch: int, sealed: Sealed) -> None:
+        path = self._blob_path(ref, subject, epoch)
+        if path.exists():
+            # Safe again now that blobs are namespaced by key epoch: an
+            # existing blob at this path was sealed under the *current* key, so
+            # reusing it neither loses data nor un-forgets any.
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
+        # A unique temp name per writer. A shared one races: concurrent writers
+        # of the same payload destroy each other's file and their events never
+        # reach the log.
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
         tmp.write_bytes(subject.encode("utf-8") + b"\0" + sealed.to_bytes())
         tmp.replace(path)
 
-    def _blob_path(self, ref: str, subject: str) -> Path:
-        """Blobs are namespaced per subject.
+    def _blob_path(self, ref: str, subject: str, epoch: int) -> Path:
+        """Blobs are namespaced per subject **and key epoch**.
 
-        Content addressing dedupes *within* a subject, which is where the
-        repetition actually is. Sharing a blob across subjects would mean one
-        subject's forget leaves another's copy readable -- a leak, not a saving.
+        Content addressing dedupes within one subject and epoch, which is where
+        the repetition actually is. Sharing across subjects would let one
+        subject's forget leave another's copy readable; sharing across epochs
+        would let a write after a forget re-seal the blob and make the
+        already-forgotten event readable again.
         """
         digest = ref.split(":", 1)[1]
         namespace = hashlib.blake2b(subject.encode(), digest_size=8).hexdigest()
-        return self.blobs / namespace / digest[:2] / digest
+        return self.blobs / namespace / f"e{epoch}" / digest[:2] / digest
 
     # -- reading ---------------------------------------------------------
 
@@ -161,7 +170,13 @@ class RecordStore:
         if event.payload_ref is None:
             raise ValueError(f"event {event.id} carries no payload")
         subject = str(event.meta.get("payload_subject") or event.subject_keys[0])
-        raw = self._blob_path(event.payload_ref, subject).read_bytes()
+        epoch = int(event.meta.get("payload_epoch", 1))
+        if epoch < self._keystore.epoch(subject):
+            # The key that sealed this is gone. Say so precisely rather than
+            # letting it surface as an authentication failure, which would be
+            # indistinguishable from tampering.
+            raise SubjectForgotten(subject)
+        raw = self._blob_path(event.payload_ref, subject, epoch).read_bytes()
         stored_subject, _, body = raw.partition(b"\0")
         sealed = Sealed.from_bytes(stored_subject.decode("utf-8"), body)
         return self._keystore.unseal(sealed, aad=event.payload_aad(stored_subject.decode("utf-8")))
@@ -174,10 +189,11 @@ class RecordStore:
         """
         try:
             return self.payload(event)
-        except (SubjectForgotten, FileNotFoundError, ValueError):
-            # ValueError is an authentication failure -- a payload sealed under
-            # a key that no longer exists. Unreadable is unreadable, and a
-            # projection must not throw on it.
+        except (SubjectForgotten, FileNotFoundError):
+            # A destroyed key raises SubjectForgotten; its blob may also be
+            # gone. Both mean "forgotten", which a projection must tolerate.
+            # An authentication failure is *not* caught: that means tampering,
+            # and silently reading it as forgotten would hide it.
             return None
 
     # -- integrity -------------------------------------------------------

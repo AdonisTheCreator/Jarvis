@@ -51,6 +51,41 @@ class TestApprovalTokens:
         with pytest.raises(ApprovalInvalid, match="expired"):
             approvals.redeem(token, "message.send", "t", {})
 
+    def test_a_store_that_omits_durable_is_treated_as_non_durable(self):
+        """Fails closed: assuming durability nobody declared would silently
+        claim a guarantee that was never made."""
+        class Undeclared:
+            def try_spend(self, token_id: str) -> bool:
+                return True
+
+        assert ApprovalLedger(os.urandom(32), Undeclared()).durable is False
+
+    def test_spending_is_atomic_under_concurrency(self):
+        """Two workers must not both redeem the same captured token."""
+        import threading
+
+        ledger = ApprovalLedger(os.urandom(32))
+        params = {"x": 1}
+        token = ledger.issue("message.send", "sam", params)
+        redeemed: list[bool] = []
+        lock = threading.Lock()
+
+        def attempt() -> None:
+            try:
+                ledger.redeem(token, "message.send", "sam", params)
+                ok = True
+            except ApprovalInvalid:
+                ok = False
+            with lock:
+                redeemed.append(ok)
+
+        threads = [threading.Thread(target=attempt) for _ in range(24)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert sum(redeemed) == 1
+
     def test_the_default_spent_store_reports_itself_non_durable(self, approvals):
         """Single-use is only true if 'already spent' survives a restart. The
         in-memory default does not, and says so rather than pretending."""
@@ -58,13 +93,18 @@ class TestApprovalTokens:
 
     def test_a_durable_spent_store_makes_single_use_survive_a_restart(self):
         class Durable:
+            """Stands in for a store backed by the same disk as the Record."""
+
             durable = True
 
             def __init__(self):
                 self.ids: set[str] = set()
 
-            def add(self, token_id): self.ids.add(token_id)
-            def contains(self, token_id): return token_id in self.ids
+            def try_spend(self, token_id: str) -> bool:
+                if token_id in self.ids:
+                    return False
+                self.ids.add(token_id)
+                return True
 
         shared = Durable()
         secret = os.urandom(32)
@@ -156,6 +196,21 @@ class TestA3RequiresAProtocol:
                     protocol="evening_lockup", auth_level=AuthLevel.STRONG)
         )
         assert decision.outcome is Outcome.ALLOW
+
+    def test_a_protocols_declared_target_binds(self, engine, approvals, protocols):
+        """target reaches the backend untouched, so a Protocol naming the front
+        door must not authorize the garage."""
+        protocols.declare(self._protocol(
+            steps=(ProtocolStep("door.unlock", {"door": "front"}, target="front"),)
+        ))
+        params = {"door": "front"}
+        token = approvals.issue("door.unlock", "garage", params)
+        decision = engine.evaluate(
+            Request("door.unlock", "garage", params, approval=token,
+                    protocol="evening_lockup", auth_level=AuthLevel.STRONG)
+        )
+        assert decision.outcome is Outcome.DENY
+        assert "on this target" in decision.reason
 
     def test_a_protocols_declared_parameters_bind(self, engine, approvals, protocols):
         """A Protocol that named the front door does not authorize the garage.

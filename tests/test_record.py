@@ -224,21 +224,66 @@ class TestRecordStore:
         assert store.payload_or_none(theirs.event) is None
         assert store.payload(mine.event) == b"identical text"  # unaffected
 
-    def test_writing_after_a_forget_is_readable(self, store: RecordStore):
-        """A blob sealed under a destroyed key must not be reused for a later
-        write of the same content -- silent data loss disguised as dedup."""
-        store.append(evt(subject_keys=["person:guest"]), b"same content")
-        store.forget_subject("person:guest")
-        store._keystore.ensure_subject("person:guest")
-        fresh = store.append(evt(subject_keys=["person:guest"]), b"same content")
-        assert store.payload(fresh.event) == b"same content"
+    def test_writing_after_a_forget_neither_loses_nor_resurrects(self, store):
+        """Both halves, which pull against each other:
 
-    def test_an_unreadable_payload_reads_as_none_rather_than_raising(self, store):
-        """A projection must not throw on a payload it cannot decrypt."""
-        stored = store.append(evt(subject_keys=["person:guest"]), b"private")
+        the new write must be readable (reusing a blob sealed under the
+        destroyed key would be silent data loss), and the old event must stay
+        forgotten (re-sealing a shared blob would un-forget it).
+        """
+        old = store.append(evt(subject_keys=["person:guest"]), b"same content")
+        assert store.payload(old.event) == b"same content"
         store.forget_subject("person:guest")
-        store._keystore.ensure_subject("person:guest")  # new key, old ciphertext
-        assert store.payload_or_none(stored.event) is None
+
+        new = store.append(evt(subject_keys=["person:guest"]), b"same content")
+        assert store.payload(new.event) == b"same content"      # not lost
+        assert store.payload_or_none(old.event) is None         # not resurrected
+        assert store.verify() == 2
+
+    def test_dedup_still_holds_within_one_key_epoch(self, store: RecordStore):
+        a = store.append(evt(subject_keys=["project:jarvis"]), b"same content")
+        b = store.append(evt(subject_keys=["project:jarvis"]), b"same content")
+        assert a.event.payload_ref == b.event.payload_ref
+        assert a.event.meta["payload_epoch"] == b.event.meta["payload_epoch"]
+
+    def test_concurrent_writes_of_one_payload_all_land(self, store: RecordStore):
+        """A shared temp path races: writers destroy each other's file and
+        their events never reach the log."""
+        import threading
+
+        payload = b"x" * 200_000
+        errors: list[Exception] = []
+        lock = threading.Lock()
+
+        def write() -> None:
+            try:
+                store.append(evt(subject_keys=["project:jarvis"]), payload)
+            except Exception as exc:  # noqa: BLE001
+                with lock:
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=write) for _ in range(8)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert not errors, errors
+        assert store.verify() == 8
+        assert all(store.payload(s.event) == payload for s in store.scan())
+
+    def test_tampering_with_a_blob_is_not_mistaken_for_a_forget(self, store):
+        """Reading a tampered payload as None would hide it, since verify()
+        only covers the log, not the blobs."""
+        stored = store.append(evt(subject_keys=["project:jarvis"]), b"private")
+        path = store._blob_path(
+            stored.event.payload_ref, "project:jarvis",
+            int(stored.event.meta["payload_epoch"]),
+        )
+        raw = bytearray(path.read_bytes())
+        raw[-1] ^= 0xFF
+        path.write_bytes(bytes(raw))
+        with pytest.raises(ValueError, match="authentication"):
+            store.payload_or_none(stored.event)
 
     def test_reopening_continues_the_chain(self, store: RecordStore, keystore):
         store.append(evt(), b"first")

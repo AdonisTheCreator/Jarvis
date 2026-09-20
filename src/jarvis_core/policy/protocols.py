@@ -37,10 +37,14 @@ class ConfirmMode(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class ProtocolStep:
-    """One capability invocation with its parameters fixed at declaration."""
+    """One capability invocation with its target and parameters fixed."""
 
     capability: str
     params: Mapping[str, Any] = field(default_factory=dict)
+    target: str | None = None
+    """The thing acted on. ``None`` places no constraint; anything else binds,
+    because ``target`` reaches the backend untouched and a Protocol that named
+    the front door must not authorize the garage."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,7 +124,11 @@ class ProtocolRegistry:
         return sorted(self._protocols)
 
     def covers(
-        self, name: str, capability: str, params: Mapping[str, Any] | None = None
+        self,
+        name: str,
+        capability: str,
+        params: Mapping[str, Any] | None = None,
+        target: str | None = None,
     ) -> bool:
         """Does Protocol ``name`` authorize this exact call?
 
@@ -131,7 +139,8 @@ class ProtocolRegistry:
         quietly reintroduce the in-the-moment judgment Protocols exist to
         remove (R8).
 
-        A step that declares no parameters places no constraint on them.
+        A step that declares no parameters or no target places no constraint on
+        that dimension.
         """
         protocol = self._protocols.get(name)
         if protocol is None:
@@ -139,6 +148,8 @@ class ProtocolRegistry:
         supplied = dict(params or {})
         for step in protocol.steps:
             if step.capability != capability:
+                continue
+            if step.target is not None and step.target != target:
                 continue
             if all(supplied.get(k) == v for k, v in step.params.items()):
                 return True

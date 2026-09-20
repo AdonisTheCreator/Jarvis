@@ -161,7 +161,9 @@ class RecallProjection:
         if scope is RecallScope.PROJECT:
             return any(key == f"project:{project}" for key in event.subject_keys)
         # RECENT: ULIDs sort by creation time, so the bound is a comparison.
-        return since_event is not None and event.id >= since_event
+        # Exclusive, matching ConsolidateProjection.pending, so a checkpoint id
+        # shared between them does not double-count the anchor event.
+        return since_event is not None and event.id > since_event
 
 
 @dataclass(frozen=True, slots=True)
