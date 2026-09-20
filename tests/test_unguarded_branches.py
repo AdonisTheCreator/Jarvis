@@ -440,3 +440,164 @@ class TestOverrideRace:
         assert router.force_release(
             key, operator="user:harrison", session="s1", subject_keys=["project:jarvis"],
         ) is False
+
+
+class TestZeroIsAValidConfidence:
+    """`0.0 <= x` with the bound flipped to `<` rejected exactly zero. A
+    decider that is certain of nothing reports 0.0, and so does every
+    fallback, so zero is the most common value there is."""
+
+    def test_provenance_accepts_it(self):
+        assert Provenance(
+            source_events=("e1",), subject_keys=("s",), confidence=0.0
+        ).confidence == 0.0
+
+    def test_a_calibration_observation_accepts_it(self):
+        log = CalibrationLog()
+        log.record("p", 0.0, correct=False)
+        assert log.report("p").n == 1
+
+    def test_a_quarantined_proposal_accepts_it(self):
+        from jarvis_core.quarantine import QuarantinedWorker
+
+        assert QuarantinedWorker("email").propose("something odd").confidence == 0.0
+
+
+class TestVerdictProperties:
+    def test_is_confident_means_the_model_answered(self):
+        from jarvis_core.decide.types import DecisionResult
+
+        for source in DecisionSource:
+            result = DecisionResult("p", "a", 0.9, source)
+            assert result.is_confident is (source is DecisionSource.MODEL)
+
+    def test_allowed_means_allow_and_nothing_else(self, engine, registry, approvals):
+        """REQUIRE_APPROVAL is not permission. It is the opposite: the thing
+        that has to happen before there is any."""
+        from jarvis_core.policy import Decision, Outcome
+
+        for outcome in Outcome:
+            decision = Decision(outcome=outcome, reason="r", capability="ci.rerun_job")
+            assert decision.allowed is (outcome is Outcome.ALLOW)
+
+
+class TestHaltReasonReachesTheHuman:
+    def test_the_operators_words_are_in_the_denial(self, registry, approvals, protocols, tmp_path):
+        """"kill switch engaged" tells you nothing you did not know. The
+        sentinel's text is the only thing that says *why* everything stopped."""
+        from jarvis_core.killswitch import FileKillSwitch
+        from jarvis_core.policy import PolicyEngine
+
+        sentinel = tmp_path / "HALT"
+        sentinel.write_text("gas leak; everything off until I say")
+        engine = PolicyEngine(registry, approvals, protocols, FileKillSwitch(sentinel))
+        reason = engine.evaluate(Request("ci.rerun_job", "j")).reason
+        assert "gas leak" in reason
+
+    def test_a_reasonless_halt_still_says_something(self, registry, approvals, protocols, tmp_path):
+        from jarvis_core.killswitch import FileKillSwitch
+        from jarvis_core.policy import PolicyEngine
+
+        sentinel = tmp_path / "HALT"
+        sentinel.write_text("")
+        engine = PolicyEngine(registry, approvals, protocols, FileKillSwitch(sentinel))
+        assert "engaged" in engine.evaluate(Request("ci.rerun_job", "j")).reason
+
+
+class TestStoredPayloadsAreRedactedByDefault:
+    def test_a_novel_credential_format_does_not_reach_the_archive(self, store: RecordStore):
+        """`redact_bytes(payload)` is called with no arguments, so the entropy
+        scan's default is what protects every stored payload. Testing redact()
+        directly leaves that default unasserted."""
+        secret = "Zx9Qw2Lm4Pv7Rt1Ys6Bn3Kd8Hg5Jf0Ac"
+        stored = store.append(evt(), f"device handle {secret} is live".encode())
+        assert secret.encode() not in store.payload(stored.event)
+        assert "high-entropy" in stored.event.meta["redacted"]
+
+
+class TestForgetFanOutRevisiting:
+    def test_a_chain_entirely_about_the_subject_is_not_double_counted(self):
+        """Both facts are direct *and* one derives from the other. The skip in
+        the traversal has to consider both sets, or a directly-removed fact is
+        also reported as derived."""
+        memory = CanonicalMemory()
+        prov = Provenance(source_events=("e1",), subject_keys=("person:guest",))
+        parent = memory.write(MemoryClass.USER_FACTS, "a", 1, prov)
+        child = memory.write(
+            MemoryClass.EPISODIC, "b", 2,
+            Provenance(source_events=("e1",), subject_keys=("person:guest",),
+                       derived_from=(parent.id,)),
+        )
+        report = memory.forget("person:guest")
+        assert set(report.directly_removed) == {parent.id, child.id}
+        assert report.derived_removed == ()
+        assert report.total == 2          # not 3
+
+
+class TestRecordWriteFailures:
+    def test_a_record_that_refuses_the_invoke_event_frees_the_claim(
+        self, registry, engine, store
+    ):
+        """Nothing has executed yet, so the claim is definitively free --
+        leaving it held would block the retry that would have worked."""
+        from test_router import CapabilityRouter, FakeBackend
+
+        class Refusing:
+            def __init__(self, real): self._real = real
+            def __getattr__(self, name): return getattr(self._real, name)
+            def append(self, *a, **kw): raise OSError("disk full")
+
+        router = CapabilityRouter(registry, engine, Refusing(store))
+        router.register_backend(FakeBackend("primary", ["ci.rerun_job"]))
+        with pytest.raises(OSError):
+            router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}))
+        assert router._idempotency.in_flight() == []
+
+    def test_a_failed_read_does_not_touch_the_ledger(self, registry, engine, store):
+        """A read takes no claim, so the failure path must not try to release
+        one -- there is nothing there to release."""
+        from test_router import CapabilityRouter
+
+        class Refusing:
+            def __init__(self, real): self._real = real
+            def __getattr__(self, name): return getattr(self._real, name)
+            def append(self, *a, **kw): raise OSError("disk full")
+
+        from test_router import FakeBackend
+        router = CapabilityRouter(registry, engine, Refusing(store))
+        router.register_backend(FakeBackend("primary", ["ci.read_status"]))
+        with pytest.raises(OSError):        # the original error, not an AttributeError
+            router.invoke(Request("ci.read_status", "repo"))
+        assert router._idempotency.in_flight() == []
+
+
+class TestEventsLandUnderTheRightSubject:
+    def test_a_failure_event_carries_the_task_subjects_not_a_placeholder(
+        self, registry, engine, store
+    ):
+        """An event filed under "system" can never be reached by the forget of
+        the person it is actually about.
+
+        Scoped to the events the router builds *from a task*. The policy
+        decision is deliberately not one of them: it is written before a task
+        exists, from a Request that has no subjects, and it is a permanent
+        audit kind that is meant to outlive the forget anyway.
+        """
+        from jarvis_core.backend import Task
+        from test_router import CapabilityRouter, FakeBackend
+
+        class Exploding(FakeBackend):
+            def execute(self, task, idempotency_key=None):
+                raise RuntimeError("boom")
+
+        router = CapabilityRouter(registry, engine, store)
+        router.register_backend(Exploding("flaky", ["ci.rerun_job"]))
+        task = Task("ci.rerun_job", "j", {"job_id": "j"}, subject_keys=("person:guest",))
+        with pytest.raises(RuntimeError):
+            router.invoke(Request("ci.rerun_job", "j", {"job_id": "j"}), task)
+        from_task = [s.event for s in store.scan() if s.event.kind in (
+            EventKind.CAPABILITY_INVOKE, EventKind.TOOL_ERROR, EventKind.CLAIM_HELD,
+        )]
+        assert from_task, "the failure path recorded nothing"
+        for event in from_task:
+            assert event.subject_keys == ("person:guest",), event.kind
